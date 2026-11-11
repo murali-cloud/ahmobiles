@@ -3,23 +3,30 @@
 import { getApp, getApps, initializeApp, type FirebaseApp } from "firebase/app";
 import {
   createUserWithEmailAndPassword,
+  EmailAuthProvider,
   getAuth,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   signInWithEmailAndPassword,
   signOut,
+  updatePassword,
   type User,
 } from "firebase/auth";
 import {
   collection,
   doc,
   getFirestore,
+  getDoc,
   onSnapshot,
   setDoc,
   Timestamp,
   type Unsubscribe,
 } from "firebase/firestore";
-import type { Customer, Payment, Sale, ServiceJob, ShopSettings, WorkspaceData } from "./types";
-import { DEFAULT_SETTINGS } from "./types";
+import type {
+  Customer, EmployeeAccount, EmployeeModule, EmployeePermissions,
+  Payment, Sale, ServiceJob, ShopSettings, WorkspaceData, WorkspaceIdentity,
+} from "./types";
+import { ADMIN_PERMISSIONS, DEFAULT_SETTINGS, NO_EMPLOYEE_PERMISSIONS } from "./types";
 
 const config = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -43,36 +50,119 @@ export function observeAuth(callback: (user: User | null) => void): Unsubscribe 
   return onAuthStateChanged(getAuth(getFirebaseApp()), callback);
 }
 
-export function signIn(email: string, password: string): Promise<User> {
-  return signInWithEmailAndPassword(getAuth(getFirebaseApp()), email, password).then(({ user }) => user);
+function firebaseLoginEmail(identifier: string): string {
+  const normalized = identifier.trim().toLowerCase();
+  return normalized.includes("@") ? normalized : `${normalized}@login.ahmobiles.invalid`;
 }
 
-export function signUp(email: string, password: string): Promise<User> {
-  return createUserWithEmailAndPassword(getAuth(getFirebaseApp()), email, password).then(({ user }) => user);
+export function signIn(username: string, password: string): Promise<User> {
+  return signInWithEmailAndPassword(getAuth(getFirebaseApp()), firebaseLoginEmail(username), password).then(({ user }) => user);
+}
+
+export function signUp(username: string, password: string): Promise<User> {
+  return createUserWithEmailAndPassword(getAuth(getFirebaseApp()), firebaseLoginEmail(username), password).then(({ user }) => user);
 }
 
 export function logOut(): Promise<void> {
   return signOut(getAuth(getFirebaseApp()));
 }
 
+export async function loadWorkspaceIdentity(user: User): Promise<WorkspaceIdentity> {
+  const profile = await getDoc(doc(getFirestore(getFirebaseApp()), "users", user.uid));
+  if (!profile.exists()) {
+    return {
+      uid: user.uid,
+      shopId: user.uid,
+      email: user.email,
+      username: user.email?.split("@")[0] || "admin",
+      role: "admin",
+      permissions: ADMIN_PERMISSIONS,
+    };
+  }
+
+  const data = profile.data();
+  if (data.role !== "employee" || data.active !== true || typeof data.shopId !== "string") {
+    throw new Error("This account is inactive. Contact your shop administrator.");
+  }
+  return {
+    uid: user.uid,
+    shopId: data.shopId,
+    email: user.email,
+    username: String(data.username || user.email?.split("@")[0] || "employee"),
+    role: "employee",
+    permissions: { ...NO_EMPLOYEE_PERMISSIONS, ...data.permissions },
+  };
+}
+
+export async function changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+  const user = getAuth(getFirebaseApp()).currentUser;
+  if (!user?.email) throw new Error("Sign in again before changing your password.");
+  const credential = EmailAuthProvider.credential(user.email, currentPassword);
+  await reauthenticateWithCredential(user, credential);
+  await updatePassword(user, newPassword);
+}
+
+async function staffRequest<T>(method: "GET" | "POST" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
+  const token = await authenticatedToken();
+  const response = await fetch("/api/staff", {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const result = await response.json() as T & { error?: string };
+  if (!response.ok) throw new Error(result.error || "The employee request failed.");
+  return result;
+}
+
+export async function listEmployees(): Promise<EmployeeAccount[]> {
+  const result = await staffRequest<{ employees: EmployeeAccount[] }>("GET");
+  return result.employees;
+}
+
+export async function createEmployee(input: {
+  username: string; password: string; permissions: EmployeePermissions;
+}): Promise<EmployeeAccount> {
+  const result = await staffRequest<{ employee: EmployeeAccount }>("POST", input);
+  return result.employee;
+}
+
+export async function updateEmployee(employeeId: string, permissions: EmployeePermissions, active: boolean): Promise<void> {
+  await staffRequest<{ success: boolean }>("PATCH", { employeeId, permissions, active });
+}
+
+export async function removeEmployee(employeeId: string): Promise<void> {
+  await staffRequest<{ success: boolean }>("DELETE", { employeeId });
+}
+
+function canReadModule(identity: WorkspaceIdentity, module: EmployeeModule): boolean {
+  if (identity.role === "admin") return true;
+  if (identity.permissions[module] !== "none") return true;
+  return (module === "sales" || module === "services") && identity.permissions.reports !== "none";
+}
+
 export function observeWorkspace(
-  uid: string,
+  identity: WorkspaceIdentity,
   onData: (data: WorkspaceData) => void,
   onError: (error: Error) => void,
 ): Unsubscribe {
   const db = getFirestore(getFirebaseApp());
-  const path = (name: string) => collection(db, "shops", uid, name);
+  const path = (name: string) => collection(db, "shops", identity.shopId, name);
   let sales: Sale[] = [];
   let services: ServiceJob[] = [];
   let customers: Customer[] = [];
   let settings: ShopSettings = DEFAULT_SETTINGS;
-  let loaded = 0;
+  const loaded = { sales: false, services: false, customers: false, settings: false };
   const emit = () => {
-    loaded += 1;
-    if (loaded >= 4) onData({ sales, services, customers, settings });
+    if (Object.values(loaded).every(Boolean)) onData({ sales, services, customers, settings });
   };
-  const stops = [
-    onSnapshot(path("sales"), (snapshot) => {
+  const stops: Unsubscribe[] = [];
+  const handleError = (reason: Error, section: keyof typeof loaded) => {
+    loaded[section] = true;
+    onError(reason);
+    emit();
+  };
+
+  if (canReadModule(identity, "sales")) stops.push(onSnapshot(path("sales"), (snapshot) => {
       sales = snapshot.docs.map((item) => {
         const sale = item.data() as Omit<Sale, "id">;
         return {
@@ -83,9 +173,12 @@ export function observeWorkspace(
           payments: (sale.payments ?? []).map((payment) => ({ ...payment, date: isoDate(payment.date) })),
         };
       });
+      loaded.sales = true;
       emit();
-    }, onError),
-    onSnapshot(path("services"), (snapshot) => {
+    }, (reason) => handleError(reason, "sales")));
+  else loaded.sales = true;
+
+  if (canReadModule(identity, "services")) stops.push(onSnapshot(path("services"), (snapshot) => {
       services = snapshot.docs.map((item) => {
         const service = item.data() as Omit<ServiceJob, "id">;
         return {
@@ -99,17 +192,26 @@ export function observeWorkspace(
           deliveryHistory: service.deliveryHistory?.map((entry) => ({ ...entry, date: isoDate(entry.date) })),
         };
       });
+      loaded.services = true;
       emit();
-    }, onError),
-    onSnapshot(path("customers"), (snapshot) => {
+    }, (reason) => handleError(reason, "services")));
+  else loaded.services = true;
+
+  if (canReadModule(identity, "customers")) stops.push(onSnapshot(path("customers"), (snapshot) => {
       customers = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }) as Customer);
+      loaded.customers = true;
       emit();
-    }, onError),
-    onSnapshot(doc(db, "shops", uid, "settings", "profile"), (snapshot) => {
+    }, (reason) => handleError(reason, "customers")));
+  else loaded.customers = true;
+
+  if (canReadModule(identity, "settings")) stops.push(onSnapshot(doc(db, "shops", identity.shopId, "settings", "profile"), (snapshot) => {
       settings = snapshot.exists() ? { ...DEFAULT_SETTINGS, ...snapshot.data() } as ShopSettings : DEFAULT_SETTINGS;
+      loaded.settings = true;
       emit();
-    }, onError),
-  ];
+    }, (reason) => handleError(reason, "settings")));
+  else loaded.settings = true;
+
+  emit();
   return () => stops.forEach((stop) => stop());
 }
 
@@ -132,7 +234,7 @@ export async function createNumberedRecord(
   prefix: string,
   record: NewRecord,
 ): Promise<{ id: string; number: string }> {
-  const token = await authenticatedToken(uid);
+  const token = await authenticatedToken();
   const response = await fetch("/api/records", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -181,7 +283,7 @@ export async function changeServiceStatus(
 }
 
 async function mutateRecord(uid: string, data: Record<string, unknown>): Promise<void> {
-  const token = await authenticatedToken(uid);
+  const token = await authenticatedToken();
   const response = await fetch("/api/records", {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -191,8 +293,8 @@ async function mutateRecord(uid: string, data: Record<string, unknown>): Promise
   if (!response.ok || !result.success) throw new Error(result.error || "The record could not be updated.");
 }
 
-async function authenticatedToken(uid: string): Promise<string> {
+async function authenticatedToken(): Promise<string> {
   const user = getAuth(getFirebaseApp()).currentUser;
-  if (!user || user.uid !== uid) throw new Error("Your session has expired. Sign in again to continue.");
+  if (!user) throw new Error("Your session has expired. Sign in again to continue.");
   return user.getIdToken();
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
-import { adminDatabase, authenticatedShop } from "@/app/lib/firebase-admin";
+import { actorHasAccess, adminDatabase, authenticatedActor } from "@/app/lib/firebase-admin";
 
 const paymentSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
@@ -100,7 +100,7 @@ function paymentStatus(total: number, paid: number): "Paid" | "Partially paid" |
   return paid > 0 ? "Partially paid" : "Unpaid";
 }
 
-function paymentDocument(uid: string, kind: "sales" | "services", recordId: string, payment: {
+function paymentDocument(createdBy: string, kind: "sales" | "services", recordId: string, payment: {
   id: string; amount: number; date: string; notes?: string;
 }) {
   return {
@@ -111,23 +111,25 @@ function paymentDocument(uid: string, kind: "sales" | "services", recordId: stri
     paymentDate: payment.date,
     notes: payment.notes ?? "",
     createdAt: FieldValue.serverTimestamp(),
-    createdBy: uid,
+    createdBy,
   };
 }
 
 export async function POST(request: Request) {
-  let uid: string | null;
-  try { uid = await authenticatedShop(request); }
+  let actor;
+  try { actor = await authenticatedActor(request); }
   catch { return responseError("Server-side Firebase Admin credentials are not configured.", 503); }
-  if (!uid) return responseError("Sign in is required.", 401);
+  if (!actor) return responseError("Sign in is required.", 401);
 
   let raw: unknown;
   try { raw = await request.json(); }
   catch { return responseError("Request body must be valid JSON.", 400); }
   const parsed = createSchema.safeParse(raw);
   if (!parsed.success) return responseError(parsed.error.issues[0]?.message ?? "The invoice data is invalid.", 400);
+  if (!actorHasAccess(actor, parsed.data.kind, "edit")) return responseError("You do not have edit access to this module.", 403);
 
   try {
+    const uid = actor.shopId;
     const db = adminDatabase();
     const { kind, prefix, record } = parsed.data;
     const year = Number(new Intl.DateTimeFormat("en-IN", {
@@ -155,19 +157,23 @@ export async function POST(request: Request) {
     const recordRef = db.doc(`shops/${uid}/${kind}/${recordId}`);
     const customerRef = db.doc(`shops/${uid}/customers/${customerId}`);
     const invoiceNumber = await db.runTransaction(async (transaction) => {
-      const [counterSnapshot, customerSnapshot] = await Promise.all([
+      const [counterSnapshot, customerSnapshot, matchingCustomers] = await Promise.all([
         transaction.get(counterRef),
         transaction.get(customerRef),
+        transaction.get(db.collection(`shops/${uid}/customers`).where("phone", "==", record.contactNumber).limit(1)),
       ]);
-      if (customerSnapshot.exists) {
-        const existingPhone = String(customerSnapshot.data()?.phone ?? "").replace(/\D/g, "");
+      const existingCustomer = customerSnapshot.exists ? customerSnapshot : matchingCustomers.docs[0];
+      const resolvedCustomerRef = existingCustomer?.ref ?? customerRef;
+      const resolvedCustomerId = resolvedCustomerRef.id;
+      if (existingCustomer) {
+        const existingPhone = String(existingCustomer.data()?.phone ?? "").replace(/\D/g, "");
         const submittedPhone = record.contactNumber.replace(/\D/g, "");
         if (existingPhone && existingPhone !== submittedPhone) {
           throw new Error("CUSTOMER_CONTACT_MISMATCH");
         }
       } else {
-        transaction.set(customerRef, {
-          id: customerId,
+        transaction.set(resolvedCustomerRef, {
+          id: resolvedCustomerId,
           name: record.customerName,
           phone: record.contactNumber,
           email: "",
@@ -182,8 +188,8 @@ export async function POST(request: Request) {
       const common = {
         ...record,
         id: recordId,
-        customerId,
-        createdBy: uid,
+        customerId: resolvedCustomerId,
+        createdBy: actor.uid,
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       };
@@ -208,16 +214,16 @@ export async function POST(request: Request) {
       }
       transaction.set(counterRef, { value: next, updatedAt: FieldValue.serverTimestamp() });
       for (const payment of initialPayments) {
-        transaction.create(db.doc(`shops/${uid}/payments/${payment.id}`), paymentDocument(uid, kind, recordId, payment));
+        transaction.create(db.doc(`shops/${uid}/payments/${payment.id}`), paymentDocument(actor.uid, kind, recordId, payment));
       }
       transaction.create(db.doc(`shops/${uid}/activityLogs/${randomUUID()}`), {
         type: kind === "sales" ? "SALE_CREATED" : "SERVICE_CREATED",
         relatedType: kind === "sales" ? "SALE" : "SERVICE",
         relatedDocumentId: recordId,
-        customerId,
+          customerId: resolvedCustomerId,
         customerName: record.customerName,
         createdAt: FieldValue.serverTimestamp(),
-        createdBy: uid,
+        createdBy: actor.uid,
       });
       return number;
     });
@@ -235,18 +241,21 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  let uid: string | null;
-  try { uid = await authenticatedShop(request); }
+  let actor;
+  try { actor = await authenticatedActor(request); }
   catch { return responseError("Server-side Firebase Admin credentials are not configured.", 503); }
-  if (!uid) return responseError("Sign in is required.", 401);
+  if (!actor) return responseError("Sign in is required.", 401);
 
   let raw: unknown;
   try { raw = await request.json(); }
   catch { return responseError("Request body must be valid JSON.", 400); }
   const parsed = patchSchema.safeParse(raw);
   if (!parsed.success) return responseError(parsed.error.issues[0]?.message ?? "The update data is invalid.", 400);
+  const recordModule = parsed.data.action === "payment" ? parsed.data.kind : "services";
+  if (!actorHasAccess(actor, recordModule, "edit")) return responseError("You do not have edit access to this module.", 403);
 
   try {
+    const uid = actor.shopId;
     const db = adminDatabase();
     const update = parsed.data;
     if (update.action === "payment") {
@@ -271,14 +280,14 @@ export async function PATCH(request: Request) {
           ...(update.kind === "sales" ? { paymentStatus: paymentStatus(total, paid + payment.amount) } : {}),
           updatedAt: FieldValue.serverTimestamp(),
         });
-        transaction.create(paymentRef, paymentDocument(uid, update.kind, update.recordId, payment));
+        transaction.create(paymentRef, paymentDocument(actor.uid, update.kind, update.recordId, payment));
         transaction.create(db.doc(`shops/${uid}/activityLogs/${randomUUID()}`), {
           type: "PAYMENT_RECORDED",
           relatedType: update.kind === "sales" ? "SALE" : "SERVICE",
           relatedDocumentId: update.recordId,
           amount: payment.amount,
           createdAt: FieldValue.serverTimestamp(),
-          createdBy: uid,
+          createdBy: actor.uid,
         });
       });
       return Response.json({ success: true });
@@ -315,7 +324,7 @@ export async function PATCH(request: Request) {
         relatedType: "SERVICE",
         relatedDocumentId: update.recordId,
         createdAt: FieldValue.serverTimestamp(),
-        createdBy: uid,
+        createdBy: actor.uid,
       });
     });
     return Response.json({ success: true });

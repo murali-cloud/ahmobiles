@@ -1,6 +1,51 @@
 export type PaymentStatus = "Paid" | "Partially paid" | "Unpaid";
 export type ServiceStatus = "Received" | "In progress" | "Ready" | "Returned";
 
+export const EMPLOYEE_MODULES = [
+  { key: "sales", label: "Sales" },
+  { key: "services", label: "Services" },
+  { key: "customers", label: "Customers" },
+  { key: "reports", label: "Reports" },
+  { key: "settings", label: "Shop settings" },
+] as const;
+
+export type EmployeeModule = typeof EMPLOYEE_MODULES[number]["key"];
+export type ModuleAccess = "none" | "view" | "edit";
+export type EmployeePermissions = Record<EmployeeModule, ModuleAccess>;
+export type WorkspaceRole = "admin" | "employee";
+
+export type EmployeeAccount = {
+  id: string;
+  username: string;
+  permissions: EmployeePermissions;
+  active: boolean;
+};
+
+export type WorkspaceIdentity = {
+  uid: string;
+  shopId: string;
+  email: string | null;
+  username: string;
+  role: WorkspaceRole;
+  permissions: EmployeePermissions;
+};
+
+export const NO_EMPLOYEE_PERMISSIONS: EmployeePermissions = {
+  sales: "none",
+  services: "none",
+  customers: "none",
+  reports: "none",
+  settings: "none",
+};
+
+export const ADMIN_PERMISSIONS: EmployeePermissions = {
+  sales: "edit",
+  services: "edit",
+  customers: "edit",
+  reports: "edit",
+  settings: "edit",
+};
+
 export type Payment = {
   id: string;
   amount: number;

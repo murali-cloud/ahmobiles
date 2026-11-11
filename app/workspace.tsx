@@ -14,18 +14,20 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { jsPDF } from "jspdf";
 import {
-  addPayment, changeServiceStatus, createNumberedRecord, firebaseConfigured, logOut,
-  observeAuth, observeWorkspace, signIn, signUp, writeRecord, writeSettings,
+  addPayment, changeOwnPassword, changeServiceStatus, createEmployee, createNumberedRecord, firebaseConfigured,
+  listEmployees, loadWorkspaceIdentity, logOut, observeAuth, observeWorkspace, removeEmployee,
+  signIn, updateEmployee, writeRecord, writeSettings,
 } from "./lib/firebase";
 import {
   makeCustomer, nextInvoiceNumber, patchSettings, readLocalWorkspace,
   updateLocalRecord, writeLocalWorkspace,
 } from "./lib/local-data";
 import {
-  DEFAULT_SETTINGS, type Customer, type Payment, type PaymentStatus,
-  type ProductLine, type Sale, type ServiceJob, type ServiceStatus, type ShopSettings, type WorkspaceData,
+  DEFAULT_SETTINGS, EMPLOYEE_MODULES, NO_EMPLOYEE_PERMISSIONS, type Customer, type EmployeeAccount,
+  type EmployeeModule, type EmployeePermissions, type ModuleAccess, type Payment, type PaymentStatus,
+  type ProductLine, type Sale, type ServiceJob, type ServiceStatus, type ShopSettings, type WorkspaceData, type WorkspaceIdentity,
 } from "./lib/types";
-import { credentialsSchema, customerSchema, saleSchema, serviceFormSchema, serviceSchema } from "./lib/validation";
+import { customerSchema, loginSchema, saleSchema, serviceFormSchema, serviceSchema } from "./lib/validation";
 
 const NAV = [
   { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
@@ -93,7 +95,7 @@ export default function Workspace() {
   const pathname = usePathname();
   const router = useRouter();
   const [data, setData] = useState<WorkspaceData>(EMPTY_DATA);
-  const [user, setUser] = useState<{ uid: string; email: string | null } | null>(null);
+  const [user, setUser] = useState<WorkspaceIdentity | null>(null);
   const [ready, setReady] = useState(!firebaseConfigured);
   const [loading, setLoading] = useState(firebaseConfigured);
   const [authLoading, setAuthLoading] = useState(firebaseConfigured);
@@ -123,20 +125,34 @@ export default function Workspace() {
   useEffect(() => {
     if (!firebaseConfigured) return;
     try {
-      return observeAuth((authUser) => {
+      let active = true;
+      const stop = observeAuth((authUser) => {
         if (pendingOwnerUid.current !== (authUser?.uid ?? null)) {
           pendingCloudRecords.current.sales.clear();
           pendingCloudRecords.current.services.clear();
           pendingOwnerUid.current = authUser?.uid ?? null;
         }
-        setUser(authUser ? { uid: authUser.uid, email: authUser.email } : null);
-        setAuthLoading(false);
+        setUser(null);
+        setAuthLoading(Boolean(authUser));
         setLoading(Boolean(authUser));
         if (!authUser) {
+          setAuthLoading(false);
           setData(EMPTY_DATA);
           setReady(true);
+          return;
         }
+        void loadWorkspaceIdentity(authUser).then((identity) => {
+          if (!active || pendingOwnerUid.current !== authUser.uid) return;
+          setUser(identity);
+          setAuthLoading(false);
+        }).catch((reason: unknown) => {
+          if (!active || pendingOwnerUid.current !== authUser.uid) return;
+          setAuthError(reason instanceof Error ? reason.message : "Could not load this account.");
+          setAuthLoading(false);
+          void logOut();
+        });
       });
+      return () => { active = false; stop(); };
     } catch (initError) {
       Promise.resolve().then(() => {
         setAuthError(initError instanceof Error ? initError.message : "Firebase could not be initialized.");
@@ -163,7 +179,7 @@ export default function Workspace() {
   useEffect(() => {
     if (!firebaseConfigured || !user) return;
     try {
-      return observeWorkspace(user.uid, (workspace) => {
+      return observeWorkspace(user, (workspace) => {
         const mergePending = <T extends { id: string }>(incoming: T[], pending: Map<string, T>) => {
           const incomingIds = new Set(incoming.map((record) => record.id));
           for (const id of incomingIds) pending.delete(id);
@@ -199,7 +215,13 @@ export default function Workspace() {
     const customer = makeCustomer(name.trim(), phone.trim(), data.customers);
     const complete = { ...customer, email: email || customer.email || "" };
     if (!data.customers.some((item) => item.id === customer.id)) {
-      if (firebaseConfigured && user) await writeRecord(user.uid, "customers", complete.id, complete);
+      if (firebaseConfigured && user) {
+        const transactionEditor = user.role === "employee"
+          && (user.permissions.sales === "edit" || user.permissions.services === "edit");
+        if (user.role !== "employee" || user.permissions.customers === "edit" || !transactionEditor) {
+          await writeRecord(user.shopId, "customers", complete.id, complete);
+        }
+      }
       else await persist(updateLocalRecord(data, "customers", complete.id, complete));
     }
     return complete;
@@ -208,7 +230,7 @@ export default function Workspace() {
   const saveSale = useCallback(async (draft: Omit<Sale, "id" | "invoiceNumber">): Promise<Sale> => {
     const customer = await saveCustomer(draft.customerName, draft.contactNumber);
     if (firebaseConfigured && user) {
-      const created = await createNumberedRecord(user.uid, "sales", data.settings.salesPrefix || "SAL", {
+      const created = await createNumberedRecord(user.shopId, "sales", data.settings.salesPrefix || "SAL", {
         ...draft, customerId: customer.id,
       });
       const sale = { ...draft, id: created.id, invoiceNumber: created.number, customerId: customer.id };
@@ -227,7 +249,7 @@ export default function Workspace() {
   const saveService = useCallback(async (draft: Omit<ServiceJob, "id" | "serviceNumber">): Promise<ServiceJob> => {
     const customer = await saveCustomer(draft.customerName, draft.contactNumber);
     if (firebaseConfigured && user) {
-      const created = await createNumberedRecord(user.uid, "services", data.settings.servicePrefix || "SRV", {
+      const created = await createNumberedRecord(user.shopId, "services", data.settings.servicePrefix || "SRV", {
         ...draft, customerId: customer.id,
       });
       const service = { ...draft, id: created.id, serviceNumber: created.number, customerId: customer.id };
@@ -251,7 +273,7 @@ export default function Workspace() {
         throw new Error("Sales invoices can only be updated by recording a new payment.");
       }
       const newPayment = { amount: payment.amount, date: payment.date, notes: payment.notes };
-      await addPayment(user.uid, "sales", sale.id, newPayment);
+      await addPayment(user.shopId, "sales", sale.id, newPayment);
     } else await persist(updateLocalRecord(data, "sales", sale.id, sale));
   }, [data, persist, user]);
 
@@ -263,9 +285,9 @@ export default function Workspace() {
         const payment = service.payments.at(-1);
         if (!payment) throw new Error("The payment details are incomplete.");
         const newPayment = { amount: payment.amount, date: payment.date, notes: payment.notes };
-        await addPayment(user.uid, "services", service.id, newPayment);
+        await addPayment(user.shopId, "services", service.id, newPayment);
       } else if (service.status !== current.status) {
-        await changeServiceStatus(user.uid, service.id, service.status, {
+        await changeServiceStatus(user.shopId, service.id, service.status, {
           readyAt: service.readyAt,
           deliveryOutDate: service.deliveryOutDate,
           deliveryOutPerson: service.deliveryOutPerson,
@@ -278,7 +300,7 @@ export default function Workspace() {
   }, [data, persist, user]);
 
   const saveShopSettings = useCallback(async (settings: ShopSettings) => {
-    if (firebaseConfigured && user) await writeSettings(user.uid, settings);
+    if (firebaseConfigured && user) await writeSettings(user.shopId, settings);
     else await persist(patchSettings(data, settings));
   }, [data, persist, user]);
 
@@ -320,15 +342,15 @@ export default function Workspace() {
   if (firebaseConfigured && !user) {
     return <AuthScreen
       error={authError}
-      onSubmit={async (email, password, create) => {
+      onSubmit={async (username, password) => {
         setAuthError("");
-        const parsed = credentialsSchema.safeParse({ email, password });
+        const parsed = loginSchema.safeParse({ username, password });
         if (!parsed.success) {
           setAuthError(parsed.error.issues[0]?.message ?? "Check your details.");
           return;
         }
         try {
-          await (create ? signUp(email, password) : signIn(email, password));
+          await signIn(username, password);
         } catch (reason) {
           const code = reason instanceof Error ? reason.message : "Authentication failed.";
           setAuthError(code.replace("Firebase: ", "").replace(/\s*\(auth\/[^)]+\)\.?/g, ""));
@@ -347,6 +369,27 @@ export default function Workspace() {
     : route === "services" ? "/services"
     : `/${route}`;
   const title = routeTitle(route, subroute);
+  const canViewModule = (module: EmployeeModule) => !firebaseConfigured || user?.role === "admin" || user?.permissions[module] !== "none";
+  const canEditModule = (module: EmployeeModule) => !firebaseConfigured || user?.role === "admin" || user?.permissions[module] === "edit";
+  const hasAnyModule = !firebaseConfigured || user?.role === "admin"
+    || Object.values(user?.permissions ?? {}).some((access) => access !== "none");
+  const routeModule: EmployeeModule | null = route === "sales" ? "sales"
+    : route === "services" ? "services"
+    : route === "customers" ? "customers"
+    : route === "reports" ? "reports"
+    : route === "settings" ? "settings"
+    : null;
+  const requiresEdit = (route === "sales" || route === "services") && subroute === "create";
+  const accessDenied = user?.role === "employee" && (
+    (routeModule !== null && !canViewModule(routeModule))
+    || (route === "dashboard" && !hasAnyModule)
+    || (requiresEdit && routeModule !== null && !canEditModule(routeModule))
+  );
+  const visibleNav = NAV.filter(({ href }) => href === "/dashboard"
+    ? hasAnyModule
+    : canViewModule(href === "/sales" ? "sales"
+      : href === "/services" || href === "/services/ready" ? "services"
+      : href === "/customers" ? "customers" : "reports"));
 
   if (!ready || loading) return <AuthLoading />;
 
@@ -407,7 +450,7 @@ export default function Workspace() {
             item.id !== customer.id && item.phone.replace(/\D/g, "") === phone.replace(/\D/g, ""));
           if (duplicate) throw new Error(`This number already belongs to ${duplicate.name}.`);
           const updated = { ...customer, name: name.trim(), phone: phone.trim(), email: email.trim() };
-          if (firebaseConfigured && user) await writeRecord(user.uid, "customers", updated.id, updated);
+          if (firebaseConfigured && user) await writeRecord(user.shopId, "customers", updated.id, updated);
           else await persist(updateLocalRecord(data, "customers", updated.id, updated));
           setModal(null);
           notify("Customer details updated.");
@@ -438,11 +481,12 @@ export default function Workspace() {
         settings={data.settings}
         onBack={() => router.push("/sales")}
         onPayment={(id) => openPayment("sale", id)}
+        canEdit={canEditModule("sales")}
       />
     : route === "sales"
     ? <SalesPage sales={data.sales} search={globalSearch} onSearch={setGlobalSearch}
         onCreate={() => router.push("/sales/create")} onView={(id) => router.push(`/sales/${id}`)}
-        onPayment={(id) => openPayment("sale", id)} settings={data.settings} />
+        onPayment={(id) => openPayment("sale", id)} settings={data.settings} canEdit={canEditModule("sales")} />
     : route === "services" && subroute === "create"
     ? <ServiceForm
         customers={data.customers}
@@ -463,16 +507,16 @@ export default function Workspace() {
     : route === "services" && subroute === "ready"
     ? <ReadyPage services={data.services} onView={(id) => router.push(`/services/${id}`)}
         onPayment={(id) => openPayment("service", id)}
-        onReturn={(service) => setServiceStatus(service, "Returned")}
+        onReturn={(service) => setServiceStatus(service, "Returned")} canEdit={canEditModule("services")}
       />
     : route === "services" && routeId
     ? <ServiceDetail service={data.services.find((item) => item.id === routeId || item.serviceNumber === routeId)}
         onBack={() => router.push("/services")} onPayment={(id) => openPayment("service", id)} settings={data.settings}
-        onUpdate={(service) => setServiceStatus(service, service.status)} />
+        onUpdate={(service) => setServiceStatus(service, service.status)} canEdit={canEditModule("services")} />
     : route === "services"
     ? <ServicesPage services={data.services} search={globalSearch} onSearch={setGlobalSearch}
         onCreate={() => router.push("/services/create")} onView={(id) => router.push(`/services/${id}`)}
-        onPayment={(id) => openPayment("service", id)} onUpdate={(service) => setServiceStatus(service, service.status)} />
+        onPayment={(id) => openPayment("service", id)} onUpdate={(service) => setServiceStatus(service, service.status)} canEdit={canEditModule("services")} />
     : route === "customers"
     ? <CustomersPage customers={data.customers} sales={data.sales} services={data.services}
         search={globalSearch} onSearch={setGlobalSearch} onAdd={addCustomerDialog}
@@ -481,13 +525,21 @@ export default function Workspace() {
     : route === "reports"
     ? <ReportsPage sales={data.sales} services={data.services} />
     : route === "settings"
-    ? <SettingsPage settings={data.settings} onSave={async (settings) => {
+    ? <SettingsPage settings={data.settings} identity={user} canEdit={canEditModule("settings")} onSave={async (settings) => {
         try { await saveShopSettings(settings); notify("Settings saved."); }
         catch (reason) { notifyFromError(reason); }
+      }} onChangePassword={async (currentPassword, newPassword) => {
+        try { await changeOwnPassword(currentPassword, newPassword); notify("Password changed."); }
+        catch (reason) { notifyFromError(reason); throw reason; }
       }} />
     : <Dashboard data={data} period={period} setPeriod={setPeriod} chartFrom={chartFrom} setChartFrom={setChartFrom} chartTo={chartTo} setChartTo={setChartTo}
         onCreateSale={() => router.push("/sales/create")}
         onCreateService={() => router.push("/services/create")}
+        canCreateSale={canEditModule("sales")}
+        canCreateService={canEditModule("services")}
+        canViewSales={canViewModule("sales") || canViewModule("reports")}
+        canViewServices={canViewModule("services") || canViewModule("reports")}
+        canViewCustomers={canViewModule("customers")}
         onSeeSales={() => router.push("/sales")}
         onSeeServices={() => router.push("/services")}
         onSeeReady={() => router.push("/services/ready")}
@@ -506,7 +558,7 @@ export default function Workspace() {
         <div className="shop-chip"><span className="shop-avatar">{(data.settings.shopName || "A")[0].toUpperCase()}</span><span>{data.settings.shopName || "My shop"}</span><ChevronDown size={14} /></div>
         <div className="nav-caption">WORKSPACE</div>
         <nav className="nav-list" aria-label="Main navigation">
-          {NAV.map(({ label, href, icon: Icon }) => (
+          {visibleNav.map(({ label, href, icon: Icon }) => (
             <Link key={href} href={href} className={`nav-link ${activeHref === href ? "active" : ""}`}
               onClick={() => setMenuOpen(false)}>
               <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
@@ -522,8 +574,8 @@ export default function Workspace() {
           <Settings size={18} strokeWidth={1.8} /><span>Settings</span>
         </Link>
         <div className="user-profile">
-          <span className="profile-avatar">{user?.email?.[0]?.toUpperCase() ?? "A"}</span>
-          <span className="profile-text"><strong>{user?.email?.split("@")[0] ?? data.settings.ownerName ?? "Shop owner"}</strong><span>{user?.email ?? (firebaseConfigured ? "Connected" : "Local workspace")}</span></span>
+          <span className="profile-avatar">{user?.username[0]?.toUpperCase() ?? "A"}</span>
+          <span className="profile-text"><strong>{user?.username ?? data.settings.ownerName ?? "Shop owner"}</strong><span>{user?.role === "employee" ? "Employee access" : user?.email ?? (firebaseConfigured ? "Connected" : "Local workspace")}</span></span>
           {firebaseConfigured && <button className="icon-btn" aria-label="Sign out" onClick={() => void logOut()}><LogOut size={16} /></button>}
         </div>
       </aside>
@@ -540,7 +592,9 @@ export default function Workspace() {
         </header>
         {!firebaseConfigured && <div className="local-banner"><ShieldCheck size={15} /><span><strong>Local preview</strong> — changes are saved in this browser only. Configure Firebase before using real customer or payment data.</span><Link href="/settings">Setup guide <ArrowRight size={13} /></Link></div>}
         {error && <div className="error-banner" role="alert"><Activity size={15} /><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss error"><X size={15} /></button></div>}
-        <main className="page-content">{view}</main>
+        <main className={`page-content ${route === "customers" && !canEditModule("customers") ? "customer-read-only" : ""}`}>
+          {accessDenied ? <AccessDenied /> : view}
+        </main>
       </div>
       {modal}
       {toast && <div className={`toast toast-${toast.tone}`} role="status">{toast.tone === "success" ? <CheckCircle2 size={17} /> : <Activity size={17} />}{toast.text}</div>}
@@ -568,22 +622,20 @@ function AuthLoading() {
 
 function AuthScreen({ error, onSubmit }: {
   error: string;
-  onSubmit: (email: string, password: string, create: boolean) => Promise<void>;
+  onSubmit: (username: string, password: string) => Promise<void>;
 }) {
-  const [create, setCreate] = useState(false);
-  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<{ email: string; password: string }>({
-    resolver: zodResolver(credentialsSchema), defaultValues: { email: "", password: "" },
+  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<{ username: string; password: string }>({
+    resolver: zodResolver(loginSchema), defaultValues: { username: "", password: "" },
   });
   return (
     <div className="auth-page">
       <div className="auth-aside"><div className="auth-brand"><div className="brand-mark"><Smartphone size={19} /></div><strong>A&H Mobiles</strong></div><div className="auth-pitch"><span className="eyebrow">YOUR SHOP, IN SYNC</span><h1>Everything your shop needs.<br /><span>All in one place.</span></h1><p>Keep sales moving, repairs on track, and every customer feeling looked after.</p><div className="auth-points"><span><Check size={15} /> Sales & service billing</span><span><Check size={15} /> Customer & payment history</span><span><Check size={15} /> Reports that make sense</span></div></div><div className="auth-aside-foot">Simple tools. Better business.</div></div>
-      <div className="auth-main"><form className="auth-form" onSubmit={handleSubmit(({ email, password }) => onSubmit(email, password, create))}>
-        <span className="eyebrow">WELCOME TO YOUR WORKSPACE</span><h2>{create ? "Create your account" : "Welcome back"}</h2><p>{create ? "Start managing your shop in one simple workspace." : "Sign in to pick up right where you left off."}</p>
-        <label className="field-label">Email address<input className="input" type="email" placeholder="you@yourshop.com" {...register("email")} /></label>{errors.email && <span className="field-error">{errors.email.message}</span>}
+      <div className="auth-main"><form className="auth-form" onSubmit={handleSubmit(({ username, password }) => onSubmit(username, password))}>
+        <span className="eyebrow">ADMIN & EMPLOYEE ACCESS</span><h2>Welcome back</h2><p>Sign in with your username or admin email.</p>
+        <label className="field-label">Username or admin email<input className="input" type="text" autoComplete="username" placeholder="Username or email" {...register("username")} /></label>{errors.username && <span className="field-error">{errors.username.message}</span>}
         <label className="field-label">Password<input className="input" type="password" placeholder="At least 8 characters" {...register("password")} /></label>{errors.password && <span className="field-error">{errors.password.message}</span>}
         {error && <div className="form-alert">{error}</div>}
-        <button className="btn btn-primary btn-full" disabled={isSubmitting}>{isSubmitting ? "Please wait…" : create ? "Create account" : "Sign in"} <ArrowRight size={16} /></button>
-        <div className="auth-switch">{create ? "Already have an account?" : "New to A&H Mobiles?"} <button type="button" onClick={() => setCreate(!create)}>{create ? "Sign in" : "Create account"}</button></div>
+        <button className="btn btn-primary btn-full" disabled={isSubmitting}>{isSubmitting ? "Please wait…" : "Sign in"} <ArrowRight size={16} /></button>
         <p className="auth-secure"><ShieldCheck size={14} /> Your workspace is private and protected by Firebase Authentication.</p>
       </form></div>
     </div>
@@ -605,10 +657,16 @@ function EmptyState({ icon: Icon = ClipboardList, title, detail, action }: { ico
   return <div className="empty-state"><div className="empty-icon"><Icon size={22} strokeWidth={1.7} /></div><strong>{title}</strong><span>{detail}</span>{action}</div>;
 }
 
-function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, setChartTo, onCreateSale, onCreateService, onSeeSales, onSeeServices, onSeeReady, onCustomer }: {
+function AccessDenied() {
+  return <div className="panel"><EmptyState icon={ShieldCheck} title="Access not granted" detail="Ask your shop administrator to enable this module or permission." /></div>;
+}
+
+function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, setChartTo, onCreateSale, onCreateService, canCreateSale, canCreateService, canViewSales, canViewServices, canViewCustomers, onSeeSales, onSeeServices, onSeeReady, onCustomer }: {
   data: WorkspaceData; period: ChartPeriod; setPeriod: (period: ChartPeriod) => void;
   chartFrom: string; setChartFrom: (value: string) => void; chartTo: string; setChartTo: (value: string) => void;
-  onCreateSale: () => void; onCreateService: () => void; onSeeSales: () => void; onSeeServices: () => void;
+  onCreateSale: () => void; onCreateService: () => void; canCreateSale: boolean; canCreateService: boolean;
+  canViewSales: boolean; canViewServices: boolean; canViewCustomers: boolean;
+  onSeeSales: () => void; onSeeServices: () => void;
   onSeeReady: () => void; onCustomer: () => void;
 }) {
   const today = new Date();
@@ -632,53 +690,59 @@ function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, 
     { label: "Total customers", value: String(data.customers.length), icon: Users, accent: "blue", note: "In your directory" },
     { label: "Outstanding", value: money(outstanding), icon: ArrowUpRight, accent: "rose", note: "Across sales & services" },
   ];
+  const visibleMetrics = metrics.filter(({ label }) => {
+    if (label === "Sales today" || label === "Sales this month") return canViewSales;
+    if (label === "Total customers") return canViewCustomers;
+    if (["Service revenue", "Total service jobs", "Pending service jobs", "Ready for delivery"].includes(label)) return canViewServices;
+    return canViewSales || canViewServices;
+  });
   const chartData = useMemo(() => period === "Custom"
     ? chartForCustomRange(data, chartFrom, chartTo)
     : chartForPeriod(data, period), [data, period, chartFrom, chartTo]);
   return (
     <>
       <PageHeader eyebrow={new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", weekday: "long", day: "numeric", month: "long" }).toUpperCase()} title="Good morning, welcome back" description="Here’s how things are looking at your shop today.">
-        <Button variant="secondary" onClick={onCreateService}><Wrench size={16} /> New service</Button><Button onClick={onCreateSale}><Plus size={17} /> Create a sale</Button>
+        {canCreateService && <Button variant="secondary" onClick={onCreateService}><Wrench size={16} /> New service</Button>}{canCreateSale && <Button onClick={onCreateSale}><Plus size={17} /> Create a sale</Button>}
       </PageHeader>
-      <div className="metrics-grid">{metrics.map(({ label, value, icon: Icon, accent, note }) =>
+      <div className="metrics-grid">{visibleMetrics.map(({ label, value, icon: Icon, accent, note }) =>
         <div className="metric-card" key={label}><div className="metric-top"><span>{label}</span><span className={`metric-icon ${accent}`}><Icon size={17} /></span></div><strong>{value}</strong><div className="metric-note"><span>{note}</span></div></div>)}</div>
       <div className="dashboard-grid">
-        <section className="panel revenue-panel">
-          <div className="panel-heading"><div><h2>Revenue overview</h2><p>Sales and service income over time</p></div><div className="segmented">{(["Week", "Month", "Year", "Custom"] as const).map((item) => <button key={item} className={period === item ? "selected" : ""} onClick={() => setPeriod(item)}>{item}</button>)}</div></div>
+        {(canViewSales || canViewServices) && <section className="panel revenue-panel">
+          <div className="panel-heading"><div><h2>Revenue overview</h2><p>{canViewSales && canViewServices ? "Sales and service income over time" : canViewSales ? "Sales revenue over time" : "Service income over time"}</p></div><div className="segmented">{(["Week", "Month", "Year", "Custom"] as const).map((item) => <button key={item} className={period === item ? "selected" : ""} onClick={() => setPeriod(item)}>{item}</button>)}</div></div>
           {period === "Custom" && <div className="date-range dashboard-date-range"><label>From<input className="input" type="date" value={chartFrom} onChange={(event) => setChartFrom(event.target.value)} /></label><ArrowRight size={15} /><label>To<input className="input" type="date" value={chartTo} onChange={(event) => setChartTo(event.target.value)} /></label><button className="text-link" onClick={() => { setChartFrom(""); setChartTo(""); }}>Clear</button></div>}
           {data.sales.length + data.services.length === 0
-            ? <div className="chart-empty"><div className="chart-empty-art"><AreaChartIcon /></div><strong>Your revenue story starts here</strong><span>Sales and services will appear as you add your first bill.</span><Button variant="secondary" onClick={onCreateSale}><Plus size={15} /> Add first sale</Button></div>
+            ? <div className="chart-empty"><div className="chart-empty-art"><AreaChartIcon /></div><strong>Your revenue story starts here</strong><span>Sales and services will appear as you add your first bill.</span>{canCreateSale && <Button variant="secondary" onClick={onCreateSale}><Plus size={15} /> Add first sale</Button>}</div>
             : period === "Custom" && (!chartFrom || !chartTo || chartFrom > chartTo)
               ? <div className="chart-empty"><strong>Choose a valid date range</strong><span>Select both dates to see revenue for that period.</span></div>
               : <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData} margin={{ top: 12, right: 9, left: -18, bottom: 0 }}>
                 <defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#4677f5" stopOpacity={0.17} /><stop offset="100%" stopColor="#4677f5" stopOpacity={0} /></linearGradient><linearGradient id="servicesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#27b69d" stopOpacity={0.16} /><stop offset="100%" stopColor="#27b69d" stopOpacity={0} /></linearGradient></defs>
-                <CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: "#98a1b3" }} dy={8} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: "#98a1b3" }} tickFormatter={(value: number) => value === 0 ? "₹0" : `₹${value / 1000}k`} /><Tooltip formatter={(value) => money(Number(value))} contentStyle={{ border: "1px solid #e8ebf1", borderRadius: 10, fontSize: 12 }} />
-                <Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" strokeWidth={2.3} fill="url(#salesFill)" activeDot={{ r: 4 }} /><Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" strokeWidth={2.3} fill="url(#servicesFill)" activeDot={{ r: 4 }} />
+                <CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} dy={8} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} tickFormatter={(value: number) => value === 0 ? "₹0" : `₹${value / 1000}k`} /><Tooltip formatter={(value) => money(Number(value))} contentStyle={{ border: "1px solid #e8ebf1", borderRadius: 10, fontSize: 14 }} />
+                {canViewSales && <Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" strokeWidth={2.3} fill="url(#salesFill)" activeDot={{ r: 4 }} />}{canViewServices && <Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" strokeWidth={2.3} fill="url(#servicesFill)" activeDot={{ r: 4 }} />}
               </AreaChart></ResponsiveContainer></div>}
-          <div className="chart-legend"><span><i className="legend-dot blue-dot" />Sales</span><span><i className="legend-dot green-dot" />Services</span></div>
-        </section>
-        <section className="panel service-overview">
+          <div className="chart-legend">{canViewSales && <span><i className="legend-dot blue-dot" />Sales</span>}{canViewServices && <span><i className="legend-dot green-dot" />Services</span>}</div>
+        </section>}
+        {canViewServices && <section className="panel service-overview">
           <div className="panel-heading"><div><h2>Service desk</h2><p>Repair jobs at a glance</p></div><button className="text-link" onClick={onSeeServices}>View all <ArrowRight size={14} /></button></div>
           <div className="service-summary">
             {(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <div className="service-count" key={status}><span className={`status-dot ${statusClass(status)}`} /> <span>{status}</span><strong>{data.services.filter((job) => job.status === status).length}</strong></div>)}
           </div>
           <div className="panel-divider" />
           <div className="ready-highlight"><div className="ready-icon"><Zap size={18} /></div><div><strong>{readyJobs.length} ready for pickup</strong><span>Let customers know their device is ready.</span></div><button className="circle-arrow" onClick={onSeeReady} aria-label="Open ready for delivery"><ArrowRight size={16} /></button></div>
-        </section>
-        <section className="panel recent-panel">
+        </section>}
+        {canViewSales && <section className="panel recent-panel">
           <div className="panel-heading"><div><h2>Recent sales</h2><p>Your latest invoices</p></div><button className="text-link" onClick={onSeeSales}>See all <ArrowRight size={14} /></button></div>
           <SalesTable sales={data.sales.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5)} compact />
-          {data.sales.length === 0 && <EmptyState icon={CreditCard} title="No sales just yet" detail="Your new invoices will show up here." action={<Button variant="secondary" onClick={onCreateSale}><Plus size={15} /> Create a sale</Button>} />}
-        </section>
-        <section className="panel ready-panel">
+          {data.sales.length === 0 && <EmptyState icon={CreditCard} title="No sales just yet" detail="Your new invoices will show up here." action={canCreateSale ? <Button variant="secondary" onClick={onCreateSale}><Plus size={15} /> Create a sale</Button> : undefined} />}
+        </section>}
+        {canViewServices && <section className="panel ready-panel">
           <div className="panel-heading"><div><h2>Waiting for pickup</h2><p>Devices ready to go home</p></div><button className="text-link" onClick={onSeeReady}>Open list <ArrowRight size={14} /></button></div>
           {readyJobs.length === 0 ? <EmptyState icon={CheckCircle2} title="All caught up" detail="Jobs marked ready will appear here." /> :
             <div className="pickup-list">{readyJobs.slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Smartphone size={17} /></span><span className="pickup-info"><strong>{job.customerName}</strong><span>{job.brand} {job.mobileModel} · {job.serviceNumber}</span></span><span className="pickup-balance">{money(Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments)))}</span></div>)}</div>}
-        </section>
-        <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div><button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button></div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{job.brand} {job.mobileModel} · {dateLabel(job.inDate)}</span></span><StatusBadge status={job.status} /></div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={<Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button>} />}</section>
-        <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recently added customers</h2><p>Your newest customer records</p></div><button className="text-link" onClick={onCustomer}>View directory <ArrowRight size={14} /></button></div>{data.customers.length ? <div className="pickup-list">{data.customers.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((customer) => <div className="pickup-item" key={customer.id}><span className="mini-avatar">{customer.name[0]?.toUpperCase() ?? "?"}</span><span className="pickup-info"><strong>{customer.name}</strong><span>{customer.phone} · Added {dateLabel(customer.createdAt)}</span></span><Users size={15} className="customer-row-icon" /></div>)}</div> : <EmptyState icon={Users} title="Your directory is ready" detail="Customers added to a bill will show up here." action={<Button variant="secondary" onClick={onCustomer}><Users size={14} /> View customers</Button>} />}</section>
+        </section>}
+        {canViewServices && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div><button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button></div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{job.brand} {job.mobileModel} · {dateLabel(job.inDate)}</span></span><StatusBadge status={job.status} /></div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={canCreateService ? <Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button> : undefined} />}</section>}
+        {canViewCustomers && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recently added customers</h2><p>Your newest customer records</p></div><button className="text-link" onClick={onCustomer}>View directory <ArrowRight size={14} /></button></div>{data.customers.length ? <div className="pickup-list">{data.customers.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((customer) => <div className="pickup-item" key={customer.id}><span className="mini-avatar">{customer.name[0]?.toUpperCase() ?? "?"}</span><span className="pickup-info"><strong>{customer.name}</strong><span>{customer.phone} · Added {dateLabel(customer.createdAt)}</span></span><Users size={15} className="customer-row-icon" /></div>)}</div> : <EmptyState icon={Users} title="Your directory is ready" detail="Customers added to a bill will show up here." action={<Button variant="secondary" onClick={onCustomer}><Users size={14} /> View customers</Button>} />}</section>}
       </div>
-      <div className="dashboard-bottom-note"><span><ShieldCheck size={15} /> Your business data stays private to your workspace.</span><button className="text-link" onClick={onCustomer}>Manage customers <ArrowRight size={13} /></button></div>
+      <div className="dashboard-bottom-note"><span><ShieldCheck size={15} /> Your business data stays private to your workspace.</span>{canViewCustomers && <button className="text-link" onClick={onCustomer}>Manage customers <ArrowRight size={13} /></button>}</div>
     </>
   );
 }
@@ -758,9 +822,9 @@ function chartForCustomRange(data: WorkspaceData, from: string, to: string) {
   }));
 }
 
-function SalesPage({ sales, search, onSearch, onCreate, onView, onPayment, settings }: {
+function SalesPage({ sales, search, onSearch, onCreate, onView, onPayment, settings, canEdit }: {
   sales: Sale[]; search: string; onSearch: (value: string) => void; onCreate: () => void;
-  onView: (id: string) => void; onPayment: (id: string) => void; settings: ShopSettings;
+  onView: (id: string) => void; onPayment: (id: string) => void; settings: ShopSettings; canEdit: boolean;
 }) {
   const [paymentFilter, setPaymentFilter] = useState("All statuses");
   const [from, setFrom] = useState("");
@@ -781,11 +845,11 @@ function SalesPage({ sales, search, onSearch, onCreate, onView, onPayment, setti
   const pageSize = 8;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   return <>
-    <PageHeader eyebrow="RETAIL" title="Sales" description="Create invoices, track payments, and keep every sale in one place."><Button onClick={onCreate}><Plus size={16} /> Create sales bill</Button></PageHeader>
+    <PageHeader eyebrow="RETAIL" title="Sales" description="Create invoices, track payments, and keep every sale in one place.">{canEdit && <Button onClick={onCreate}><Plus size={16} /> Create sales bill</Button>}</PageHeader>
     <div className="page-stat-row"><span className="stat-pill"><FileText size={15} /><strong>{sales.length}</strong> invoices</span><span className="stat-pill"><ArrowUpRight size={15} /><strong>{money(sales.reduce((sum, sale) => sum + sale.finalAmount, 0))}</strong> billed</span><span className="stat-pill"><Clock3 size={15} /><strong>{money(sales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0))}</strong> due</span></div>
     <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search invoice, customer or phone…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All statuses</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option></select><ChevronDown size={14} /></label><input aria-label="Sales from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /><input aria-label="Sales to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
-      {filtered.length ? <SalesTable sales={filtered.slice((page - 1) * pageSize, page * pageSize)} onView={onView} onPayment={onPayment} settings={settings} /> :
-        <EmptyState icon={CreditCard} title={search || paymentFilter !== "All statuses" ? "No matching invoices" : "Ready for your first sale?"} detail={sales.length ? "Try a different search or payment status." : "Create a sales bill and your invoices will appear here."} action={!sales.length ? <Button onClick={onCreate}><Plus size={15} /> Create sales bill</Button> : undefined} />}
+      {filtered.length ? <SalesTable sales={filtered.slice((page - 1) * pageSize, page * pageSize)} onView={onView} onPayment={canEdit ? onPayment : undefined} settings={settings} /> :
+        <EmptyState icon={CreditCard} title={search || paymentFilter !== "All statuses" ? "No matching invoices" : "Ready for your first sale?"} detail={sales.length ? "Try a different search or payment status." : "Create a sales bill and your invoices will appear here."} action={!sales.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> Create sales bill</Button> : undefined} />}
       {filtered.length > 0 && <Pagination page={page} pages={pages} total={filtered.length} pageSize={pageSize} onPage={setPage} />}
     </div>
   </>;
@@ -938,9 +1002,9 @@ function ServiceForm({ customers, settings, busy, onSubmit, onCancel }: {
   </>;
 }
 
-function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment, onUpdate }: {
+function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment, onUpdate, canEdit }: {
   services: ServiceJob[]; search: string; onSearch: (value: string) => void; onCreate: () => void;
-  onView: (id: string) => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void;
+  onView: (id: string) => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; canEdit: boolean;
 }) {
   const router = useRouter();
   const [statusFilter, setStatusFilter] = useState("All statuses");
@@ -961,20 +1025,20 @@ function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment,
   const pageSize = 8;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   return <>
-    <PageHeader eyebrow="REPAIR & CARE" title="Service desk" description="Track every repair from intake to handover."><Button variant="secondary" onClick={() => router.push("/services/ready")}><CheckCircle2 size={15} /> Ready for pickup</Button><Button onClick={onCreate}><Plus size={16} /> New service job</Button></PageHeader>
+    <PageHeader eyebrow="REPAIR & CARE" title="Service desk" description="Track every repair from intake to handover."><Button variant="secondary" onClick={() => router.push("/services/ready")}><CheckCircle2 size={15} /> Ready for pickup</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> New service job</Button>}</PageHeader>
     <div className="service-kpis">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <div className="service-kpi" key={status}><span className={`status-dot ${statusClass(status)}`} /><span>{status}</span><strong>{services.filter((item) => item.status === status).length}</strong></div>)}</div>
     <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search bill, customer, model or IMEI…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label><label className="select-wrap"><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All payments</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option></select><ChevronDown size={14} /></label><input aria-label="Services from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /><input aria-label="Services to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
       {filtered.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL</th><th>CUSTOMER</th><th>DEVICE</th><th>REPORTED FAULT</th><th>STATUS</th><th>AMOUNT / DUE</th><th /></tr></thead><tbody>{filtered.slice((page - 1) * pageSize, page * pageSize).map((job) => {
         const due = Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments));
-        return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button><small className="table-subtext">{dateLabel(job.inDate)}</small></td><td><span className="customer-cell"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></span></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td><span className="muted-cell ellipsis-cell">{job.reportedFault}</span></td><td><select className={`status-select status-${statusClass(job.status)}`} value={job.status} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><strong>{money(job.serviceAmount - job.discount)}</strong><small className={due ? "due-text" : "table-subtext"}>{due ? `${money(due)} due` : "Settled"}</small></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
-      })}</tbody></table></div> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
+        return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button><small className="table-subtext">{dateLabel(job.inDate)}</small></td><td><span className="customer-cell"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></span></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td><span className="muted-cell ellipsis-cell">{job.reportedFault}</span></td><td><select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><strong>{money(job.serviceAmount - job.discount)}</strong><small className={due ? "due-text" : "table-subtext"}>{due ? `${money(due)} due` : "Settled"}</small></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
+      })}</tbody></table></div> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
       {filtered.length > 0 && <Pagination page={page} pages={pages} total={filtered.length} pageSize={pageSize} onPage={setPage} />}
     </div>
   </>;
 }
 
-function ReadyPage({ services, onView, onPayment, onReturn }: {
-  services: ServiceJob[]; onView: (id: string) => void; onPayment: (id: string) => void; onReturn: (service: ServiceJob) => void;
+function ReadyPage({ services, onView, onPayment, onReturn, canEdit }: {
+  services: ServiceJob[]; onView: (id: string) => void; onPayment: (id: string) => void; onReturn: (service: ServiceJob) => void; canEdit: boolean;
 }) {
   const router = useRouter();
   const readyJobs = services.filter((service) => service.status === "Ready").sort((a, b) => (b.readyAt ?? "").localeCompare(a.readyAt ?? ""));
@@ -983,36 +1047,36 @@ function ReadyPage({ services, onView, onPayment, onReturn }: {
     <div className="delivery-summary"><span className="delivery-summary-icon"><CheckCircle2 size={18} /></span><div><strong>{readyJobs.length} {readyJobs.length === 1 ? "device is" : "devices are"} ready</strong><span>Collect any remaining balance before handover.</span></div><strong className="delivery-total">{money(readyJobs.reduce((sum, item) => sum + Math.max(0, item.serviceAmount - item.discount - paymentTotal(item.payments)), 0))}<small>total balance</small></strong></div>
     {readyJobs.length ? <div className="ready-grid">{readyJobs.map((job) => {
       const due = Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments));
-      return <article className="ready-card" key={job.id}><div className="ready-card-top"><span className="ready-device-icon"><Smartphone size={20} /></span><StatusBadge status="Ready" /><button className="more-btn" aria-label="More actions" onClick={() => onView(job.id)}><MoreHorizontal size={18} /></button></div><div className="ready-card-id">{job.serviceNumber}</div><h2>{job.brand} {job.mobileModel}</h2><p>{job.reportedFault}</p><div className="ready-customer"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></div><div className="ready-card-meta"><span>Ready since <strong>{dateLabel(job.readyAt ?? job.inDate)}</strong></span><span>Balance <strong className={due ? "balance-due" : "balance-paid"}>{money(due)}</strong></span></div><div className="ready-card-actions">{due > 0 && <Button variant="secondary" onClick={() => onPayment(job.id)}><CreditCard size={14} /> Collect payment</Button>}<Button onClick={() => onReturn(job)}><Check size={15} /> Mark returned</Button></div></article>;
+      return <article className="ready-card" key={job.id}><div className="ready-card-top"><span className="ready-device-icon"><Smartphone size={20} /></span><StatusBadge status="Ready" /><button className="more-btn" aria-label="More actions" onClick={() => onView(job.id)}><MoreHorizontal size={18} /></button></div><div className="ready-card-id">{job.serviceNumber}</div><h2>{job.brand} {job.mobileModel}</h2><p>{job.reportedFault}</p><div className="ready-customer"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></div><div className="ready-card-meta"><span>Ready since <strong>{dateLabel(job.readyAt ?? job.inDate)}</strong></span><span>Balance <strong className={due ? "balance-due" : "balance-paid"}>{money(due)}</strong></span></div>{canEdit && <div className="ready-card-actions">{due > 0 && <Button variant="secondary" onClick={() => onPayment(job.id)}><CreditCard size={14} /> Collect payment</Button>}<Button onClick={() => onReturn(job)}><Check size={15} /> Mark returned</Button></div>}</article>;
     })}</div> : <div className="panel"><EmptyState icon={CheckCircle2} title="Nothing waiting for pickup" detail="When a service job is marked Ready, you’ll find it here." action={<Button variant="secondary" onClick={() => router.push("/services")}><Wrench size={15} /> View service jobs</Button>} /></div>}
   </>;
 }
 
-function ServiceDetail({ service, settings, onBack, onPayment, onUpdate }: {
-  service?: ServiceJob; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void;
+function ServiceDetail({ service, settings, onBack, onPayment, onUpdate, canEdit }: {
+  service?: ServiceJob; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; canEdit: boolean;
 }) {
   if (!service) return <NotFound title="Service job not found" backLabel="Back to services" onBack={onBack} />;
   const due = Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments));
   return <>
     <PageHeader eyebrow="SERVICE JOB" title={service.serviceNumber} description={`${service.brand} ${service.mobileModel} · Received ${dateLabel(service.inDate)}`}><Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> All services</Button><Button variant="secondary" onClick={() => downloadServiceReceipt(service, settings)}><Download size={15} /> Download PDF</Button><Button variant="secondary" onClick={() => printReceipt(service, settings)}><Printer size={15} /> Print receipt</Button></PageHeader>
     <div className="detail-grid"><div className="detail-main">
-      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Repair status</h2><p>Track the job from intake through handover.</p></div><select className={`status-select status-${statusClass(service.status)}`} value={service.status} onChange={(event) => onUpdate({ ...service, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : service.readyAt, deliveryOutDate: event.target.value === "Returned" ? new Date().toISOString() : service.deliveryOutDate })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></div><div className="status-timeline">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status, index) => { const completed = (["Received", "In progress", "Ready", "Returned"] as string[]).indexOf(service.status) >= index; return <div className={`timeline-step ${completed ? "done" : ""}`} key={status}><span>{completed ? <Check size={13} /> : index + 1}</span><strong>{status}</strong>{index < 3 && <i />}</div>; })}</div></section>
+      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Repair status</h2><p>Track the job from intake through handover.</p></div><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit} onChange={(event) => onUpdate({ ...service, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : service.readyAt, deliveryOutDate: event.target.value === "Returned" ? new Date().toISOString() : service.deliveryOutDate })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></div><div className="status-timeline">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status, index) => { const completed = (["Received", "In progress", "Ready", "Returned"] as string[]).indexOf(service.status) >= index; return <div className={`timeline-step ${completed ? "done" : ""}`} key={status}><span>{completed ? <Check size={13} /> : index + 1}</span><strong>{status}</strong>{index < 3 && <i />}</div>; })}</div></section>
       <section className="panel detail-panel"><div className="panel-heading"><div><h2>Device & issue</h2><p>What came in, and what needs attention.</p></div></div><div className="detail-fields"><DetailField label="Customer" value={service.customerName} /><DetailField label="Contact number" value={service.contactNumber} /><DetailField label="Device" value={`${service.brand} ${service.mobileModel}`} /><DetailField label="IMEI" value={service.imei || "Not recorded"} /><DetailField label="Reported fault" value={service.reportedFault} /><DetailField label="Received condition" value={service.receivedConditions.join(", ") || "Not specified"} /><DetailField label="Technician notes" value={service.technicianNotes || "—"} /><DetailField label="Additional remarks" value={service.remarks || "—"} /></div><div className="credential-notice"><ShieldCheck size={16} /><span>Device unlock credentials are not collected or shown on this job record.</span></div></section>
-      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Payment history</h2><p>Payments are recorded as separate entries.</p></div>{due > 0 && <Button variant="secondary" onClick={() => onPayment(service.id)}><Plus size={14} /> Add payment</Button>}</div>{service.payments.length ? <div className="payment-history">{service.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section>
+      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Payment history</h2><p>Payments are recorded as separate entries.</p></div>{canEdit && due > 0 && <Button variant="secondary" onClick={() => onPayment(service.id)}><Plus size={14} /> Add payment</Button>}</div>{service.payments.length ? <div className="payment-history">{service.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section>
       {(service.deliveryHistory?.length ?? 0) > 0 && <section className="panel detail-panel"><div className="panel-heading"><div><h2>Delivery history</h2><p>Recorded handovers for this device.</p></div></div><div className="payment-history">{service.deliveryHistory?.slice().reverse().map((entry, index) => <div className="payment-row" key={`${entry.date}-${index}`}><span className="payment-method-icon"><CheckCircle2 size={15} /></span><span><strong>Handed over to customer</strong><small>{dateLabel(entry.date)} · {entry.person}{entry.remarks ? ` · ${entry.remarks}` : ""}</small></span></div>)}</div></section>}
-    </div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service balance</strong><small>{service.status}</small></span></div><div className="total-lines"><span>Service amount <strong>{money(service.serviceAmount)}</strong></span><span>Discount <strong>− {money(service.discount)}</strong></span><span>Amount paid <strong>{money(paymentTotal(service.payments))}</strong></span><div className="total-final"><span>Balance due</span><strong>{money(due)}</strong></div></div>{due > 0 && <Button className="btn-full" onClick={() => onPayment(service.id)}><CreditCard size={15} /> Record payment</Button>}</div>{service.deliveryOutDate && <div className="panel delivery-note"><CheckCircle2 size={17} /><strong>Device returned</strong><span>{dateLabel(service.deliveryOutDate)}{service.deliveryOutPerson ? ` · ${service.deliveryOutPerson}` : ""}</span>{service.deliveryRemarks && <small>{service.deliveryRemarks}</small>}</div>}</aside></div>
+    </div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service balance</strong><small>{service.status}</small></span></div><div className="total-lines"><span>Service amount <strong>{money(service.serviceAmount)}</strong></span><span>Discount <strong>− {money(service.discount)}</strong></span><span>Amount paid <strong>{money(paymentTotal(service.payments))}</strong></span><div className="total-final"><span>Balance due</span><strong>{money(due)}</strong></div></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(service.id)}><CreditCard size={15} /> Record payment</Button>}</div>{service.deliveryOutDate && <div className="panel delivery-note"><CheckCircle2 size={17} /><strong>Device returned</strong><span>{dateLabel(service.deliveryOutDate)}{service.deliveryOutPerson ? ` · ${service.deliveryOutPerson}` : ""}</span>{service.deliveryRemarks && <small>{service.deliveryRemarks}</small>}</div>}</aside></div>
   </>;
 }
 
-function SaleDetail({ sale, settings, onBack, onPayment }: {
-  sale?: Sale; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void;
+function SaleDetail({ sale, settings, onBack, onPayment, canEdit }: {
+  sale?: Sale; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; canEdit: boolean;
 }) {
   if (!sale) return <NotFound title="Invoice not found" backLabel="Back to sales" onBack={onBack} />;
   const paid = paymentTotal(sale.payments);
   const due = Math.max(0, sale.finalAmount - paid);
   return <>
     <PageHeader eyebrow="SALES INVOICE" title={sale.invoiceNumber} description={`${sale.customerName} · ${dateLabel(sale.invoiceDate)}`}><Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> Sales history</Button><Button variant="secondary" onClick={() => downloadInvoice(sale, settings)}><Download size={15} /> Download PDF</Button><Button onClick={() => printInvoice(sale, settings)}><Printer size={15} /> Print invoice</Button></PageHeader>
-    <div className="detail-grid"><div className="detail-main"><InvoicePreview sale={sale} settings={settings} /><section className="panel detail-panel"><div className="panel-heading"><div><h2>Payment history</h2><p>Every payment is listed separately.</p></div>{due > 0 && <Button variant="secondary" onClick={() => onPayment(sale.id)}><Plus size={14} /> Add payment</Button>}</div>{sale.payments.length ? <div className="payment-history">{sale.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section></div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon"><CreditCard size={17} /></span><span><strong>Payment summary</strong><small>{statusOf(sale.finalAmount, paid)}</small></span></div><div className="total-lines"><span>Subtotal <strong>{money(sale.subtotal)}</strong></span><span>Discount <strong>− {money(sale.discount)}</strong></span><span>Tax <strong>{money(sale.tax)}</strong></span><div className="total-final"><span>Invoice total</span><strong>{money(sale.finalAmount)}</strong></div><span>Paid <strong>{money(paid)}</strong></span></div><div className={`balance-box ${due <= 0 ? "settled" : ""}`}><span>Balance due</span><strong>{money(due)}</strong></div>{due > 0 && <Button className="btn-full" onClick={() => onPayment(sale.id)}><CreditCard size={15} /> Record payment</Button>}</div></aside></div>
+    <div className="detail-grid"><div className="detail-main"><InvoicePreview sale={sale} settings={settings} /><section className="panel detail-panel"><div className="panel-heading"><div><h2>Payment history</h2><p>Every payment is listed separately.</p></div>{canEdit && due > 0 && <Button variant="secondary" onClick={() => onPayment(sale.id)}><Plus size={14} /> Add payment</Button>}</div>{sale.payments.length ? <div className="payment-history">{sale.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section></div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon"><CreditCard size={17} /></span><span><strong>Payment summary</strong><small>{statusOf(sale.finalAmount, paid)}</small></span></div><div className="total-lines"><span>Subtotal <strong>{money(sale.subtotal)}</strong></span><span>Discount <strong>− {money(sale.discount)}</strong></span><span>Tax <strong>{money(sale.tax)}</strong></span><div className="total-final"><span>Invoice total</span><strong>{money(sale.finalAmount)}</strong></div><span>Paid <strong>{money(paid)}</strong></span></div><div className={`balance-box ${due <= 0 ? "settled" : ""}`}><span>Balance due</span><strong>{money(due)}</strong></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(sale.id)}><CreditCard size={15} /> Record payment</Button>}</div></aside></div>
   </>;
 }
 
@@ -1198,11 +1262,17 @@ function ReportsPage({ sales, services }: { sales: Sale[]; services: ServiceJob[
     <PageHeader eyebrow="BUSINESS INSIGHTS" title="Reports" description="A clear picture of sales, services, and the money collected."><Button variant="secondary" onClick={exportCsv}><Download size={15} /> Export CSV</Button></PageHeader>
     <section className="panel report-filter"><div><strong>Report period</strong><span>Choose a date range for your records.</span></div><div className="date-range"><label>From<input className="input" type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><ArrowRight size={15} /><label>To<input className="input" type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label><button className="text-link" onClick={() => { setFrom(""); setTo(""); }}>Clear</button></div></section>
     <div className="report-metrics">{[{ label: "Sales billed", value: money(salesTotal), note: `${filteredSales.length} invoices`, icon: CreditCard }, { label: "Service revenue", value: money(filteredServices.reduce((sum, item) => sum + item.serviceAmount - item.discount, 0)), note: `${filteredServices.length} jobs`, icon: Wrench }, { label: "Collected", value: money(collected), note: "Sales & service payments", icon: CheckCircle2 }, { label: "Outstanding", value: money(due), note: "Remaining balances", icon: Clock3 }].map(({ label, value, note, icon: Icon }) => <div className="panel report-metric" key={label}><span className="metric-icon blue"><Icon size={17} /></span><span>{label}<strong>{value}</strong><small>{note}</small></span></div>)}</div>
-    <div className="reports-grid"><section className="panel report-chart-panel"><div className="panel-heading"><div><h2>Revenue over time</h2><p>Filtered invoice and service totals</p></div></div>{filteredSales.length + filteredServices.length ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartForPeriod({ ...EMPTY_DATA, sales: filteredSales, services: filteredServices }, "Month")}><CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: "#98a1b3" }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: "#98a1b3" }} /><Tooltip formatter={(value) => money(Number(value))} /><Area type="monotone" dataKey="sales" stroke="#4777f5" fill="#4777f5" fillOpacity={0.12} /><Area type="monotone" dataKey="services" stroke="#22ad94" fill="#22ad94" fillOpacity={0.12} /></AreaChart></ResponsiveContainer></div> : <EmptyState icon={BarChart3} title="Your reports will grow with you" detail="Add sales and service jobs to see your revenue trends." />}</section><section className="panel report-status-panel"><div className="panel-heading"><div><h2>Service status</h2><p>Jobs by current stage</p></div></div>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => { const count = filteredServices.filter((service) => service.status === status).length; const ratio = filteredServices.length ? count / filteredServices.length * 100 : 0; return <div className="report-status" key={status}><div><span>{status}</span><strong>{count}</strong></div><div className="progress-track"><i className={`progress-${statusClass(status)}`} style={{ width: `${ratio}%` }} /></div></div>; })}</section></div>
+    <div className="reports-grid"><section className="panel report-chart-panel"><div className="panel-heading"><div><h2>Revenue over time</h2><p>Filtered invoice and service totals</p></div></div>{filteredSales.length + filteredServices.length ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartForPeriod({ ...EMPTY_DATA, sales: filteredSales, services: filteredServices }, "Month")}><CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><Tooltip formatter={(value) => money(Number(value))} /><Area type="monotone" dataKey="sales" stroke="#4777f5" fill="#4777f5" fillOpacity={0.12} /><Area type="monotone" dataKey="services" stroke="#22ad94" fill="#22ad94" fillOpacity={0.12} /></AreaChart></ResponsiveContainer></div> : <EmptyState icon={BarChart3} title="Your reports will grow with you" detail="Add sales and service jobs to see your revenue trends." />}</section><section className="panel report-status-panel"><div className="panel-heading"><div><h2>Service status</h2><p>Jobs by current stage</p></div></div>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => { const count = filteredServices.filter((service) => service.status === status).length; const ratio = filteredServices.length ? count / filteredServices.length * 100 : 0; return <div className="report-status" key={status}><div><span>{status}</span><strong>{count}</strong></div><div className="progress-track"><i className={`progress-${statusClass(status)}`} style={{ width: `${ratio}%` }} /></div></div>; })}</section></div>
   </>;
 }
 
-function SettingsPage({ settings, onSave }: { settings: ShopSettings; onSave: (settings: ShopSettings) => Promise<void> }) {
+function SettingsPage({ settings, identity, canEdit, onSave, onChangePassword }: {
+  settings: ShopSettings;
+  identity: WorkspaceIdentity | null;
+  canEdit: boolean;
+  onSave: (settings: ShopSettings) => Promise<void>;
+  onChangePassword: (currentPassword: string, newPassword: string) => Promise<void>;
+}) {
   const [form, setForm] = useState(settings);
   const [saving, setSaving] = useState(false);
   const [logoError, setLogoError] = useState("");
@@ -1238,8 +1308,10 @@ function SettingsPage({ settings, onSave }: { settings: ShopSettings; onSave: (s
   };
   return <>
     <PageHeader eyebrow="YOUR WORKSPACE" title="Settings" description="Make every invoice feel like it came from your shop." />
+    <AccountAccessSettings identity={identity} onChangePassword={onChangePassword} />
     <form onSubmit={submit} className="settings-layout">
       <div className="settings-main">
+        <fieldset className="settings-fields" disabled={!canEdit}>
         <section className="panel form-panel">
           <div className="form-section-head"><span className="step-number"><Settings size={16} /></span><div><h2>Shop information</h2><p>This information appears on customer invoices and receipts.</p></div></div>
           <div className="form-grid two-col">
@@ -1266,8 +1338,9 @@ function SettingsPage({ settings, onSave }: { settings: ShopSettings; onSave: (s
             <div className="invoice-format-preview"><span>Next invoice numbers</span><strong>{form.salesPrefix || "SAL"}-{businessYear()}-0001</strong><strong>{form.servicePrefix || "SRV"}-{businessYear()}-0001</strong></div>
           </div>
         </section>
+        </fieldset>
         {!firebaseConfigured && <div className="panel setup-card"><span className="setup-icon"><ShieldCheck size={18} /></span><div><strong>Connect Firebase for production</strong><p>Local preview data stays in this browser. Add Firebase environment variables and deploy the included Firestore rules before entering real business data.</p><code>.env.local ← .env.example</code></div></div>}
-        <div className="form-footer"><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={16} /> Save settings</>}</Button></div>
+        {canEdit && <div className="form-footer"><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={16} /> Save settings</>}</Button></div>}
       </div>
       <aside className="settings-aside">
         <div className="panel settings-note"><span className="settings-note-icon"><ShieldCheck size={17} /></span><h3>Your data, kept safe.</h3><p>When Firebase is connected, each workspace is scoped to its authenticated owner. Configure Firestore rules before going live.</p><a href="https://firebase.google.com/docs/firestore/security/get-started" target="_blank" rel="noreferrer">Read about Firestore security <ArrowRight size={13} /></a></div>
@@ -1275,6 +1348,126 @@ function SettingsPage({ settings, onSave }: { settings: ShopSettings; onSave: (s
       </aside>
     </form>
   </>;
+}
+
+function AccountAccessSettings({ identity, onChangePassword }: {
+  identity: WorkspaceIdentity | null;
+  onChangePassword: (currentPassword: string, newPassword: string) => Promise<void>;
+}) {
+  const [employees, setEmployees] = useState<EmployeeAccount[]>([]);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [permissions, setPermissions] = useState<EmployeePermissions>({ ...NO_EMPLOYEE_PERMISSIONS });
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+
+  useEffect(() => {
+    if (identity?.role !== "admin") return;
+    let active = true;
+    void listEmployees().then((items) => {
+      if (active) setEmployees(items);
+    }).catch((reason: unknown) => {
+      if (active) setError(reason instanceof Error ? reason.message : "Employees could not be loaded.");
+    });
+    return () => { active = false; };
+  }, [identity]);
+
+  const savePassword = async () => {
+    setPasswordError("");
+    if (newPassword.length < 8) { setPasswordError("Use at least 8 characters for the new password."); return; }
+    if (newPassword !== confirmPassword) { setPasswordError("The new passwords do not match."); return; }
+    setBusy(true);
+    try {
+      await onChangePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (reason) {
+      setPasswordError(reason instanceof Error ? reason.message : "The password could not be changed.");
+    } finally { setBusy(false); }
+  };
+
+  const createAccount = async () => {
+    setError("");
+    setBusy(true);
+    try {
+      const employee = await createEmployee({ username, password, permissions });
+      setEmployees((current) => [...current, employee]);
+      setUsername("");
+      setPassword("");
+      setPermissions({ ...NO_EMPLOYEE_PERMISSIONS });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Employee account could not be created.");
+    } finally { setBusy(false); }
+  };
+
+  const changeEmployee = async (employee: EmployeeAccount, module: EmployeeModule, access: ModuleAccess) => {
+    const nextPermissions = { ...employee.permissions, [module]: access };
+    setError("");
+    setBusy(true);
+    try {
+      await updateEmployee(employee.id, nextPermissions, employee.active);
+      setEmployees((current) => current.map((item) => item.id === employee.id ? { ...item, permissions: nextPermissions } : item));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Employee permissions could not be updated.");
+    } finally { setBusy(false); }
+  };
+
+  const toggleEmployee = async (employee: EmployeeAccount) => {
+    setError("");
+    setBusy(true);
+    try {
+      await updateEmployee(employee.id, employee.permissions, !employee.active);
+      setEmployees((current) => current.map((item) => item.id === employee.id ? { ...item, active: !item.active } : item));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Employee account could not be updated.");
+    } finally { setBusy(false); }
+  };
+
+  const deleteEmployee = async (employee: EmployeeAccount) => {
+    if (!window.confirm(`Remove ${employee.username}'s account?`)) return;
+    setError("");
+    setBusy(true);
+    try {
+      await removeEmployee(employee.id);
+      setEmployees((current) => current.filter((item) => item.id !== employee.id));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Employee account could not be removed.");
+    } finally { setBusy(false); }
+  };
+
+  return <div className="account-access-settings">
+    {identity && <section className="panel form-panel">
+      <div className="form-section-head"><span className="step-number"><ShieldCheck size={16} /></span><div><h2>Account security</h2><p>Change the password for your {identity.role} sign-in.</p></div></div>
+      <div className="form-grid two-col">
+        <FormField label="Current password"><input className="input" type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></FormField>
+        <FormField label="New password"><input className="input" type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></FormField>
+        <FormField label="Confirm new password"><input className="input" type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></FormField>
+      </div>
+      <div className="form-footer"><Button variant="secondary" disabled={busy || !currentPassword || !newPassword || !confirmPassword} onClick={() => void savePassword()}>Change password</Button></div>
+      {passwordError && <div className="form-alert" role="alert">{passwordError}</div>}
+    </section>}
+    {identity?.role === "admin" && <section className="panel form-panel">
+      <div className="form-section-head"><span className="step-number"><Users size={16} /></span><div><h2>Employee access</h2><p>Create staff logins and choose which modules they can view or edit.</p></div></div>
+      <div className="form-grid two-col employee-create-fields">
+        <FormField label="Username"><input className="input" autoComplete="off" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="e.g. sales.staff" /></FormField>
+        <FormField label="Temporary password"><input className="input" type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></FormField>
+      </div>
+      <div className="employee-permissions">
+        {EMPLOYEE_MODULES.map(({ key, label }) => <label className="employee-permission" key={key}><span>{label}</span><select className="input" value={permissions[key]} onChange={(event) => setPermissions((current) => ({ ...current, [key]: event.target.value as ModuleAccess }))}><option value="none">No access</option><option value="view">View only</option><option value="edit">Edit</option></select></label>)}
+      </div>
+      <div className="form-footer"><Button variant="secondary" disabled={busy || !username || password.length < 8 || Object.values(permissions).every((access) => access === "none")} onClick={() => void createAccount()}><Plus size={15} /> Create employee</Button></div>
+      {employees.length > 0 && <div className="employee-list">{employees.map((employee) => <article className="employee-row" key={employee.id}>
+        <div className="employee-row-heading"><strong>{employee.username}</strong><span className={employee.active ? "employee-active" : "employee-inactive"}>{employee.active ? "Active" : "Disabled"}</span><button className="btn btn-secondary" type="button" disabled={busy} onClick={() => void toggleEmployee(employee)}>{employee.active ? "Disable" : "Enable"}</button><button className="btn btn-danger" type="button" disabled={busy} onClick={() => void deleteEmployee(employee)}>Remove</button></div>
+        <div className="employee-permissions">{EMPLOYEE_MODULES.map(({ key, label }) => <label className="employee-permission" key={key}><span>{label}</span><select className="input" value={employee.permissions[key]} disabled={busy || !employee.active} onChange={(event) => void changeEmployee(employee, key, event.target.value as ModuleAccess)}><option value="none">No access</option><option value="view">View only</option><option value="edit">Edit</option></select></label>)}</div>
+      </article>)}</div>}
+      {error && <div className="form-alert" role="alert">{error}</div>}
+    </section>}
+  </div>;
 }
 
 function PaymentModal({ total, paid, onClose, onSave }: {

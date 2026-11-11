@@ -2,6 +2,10 @@ import "server-only";
 import { cert, getApps, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
+import {
+  ADMIN_PERMISSIONS, NO_EMPLOYEE_PERMISSIONS,
+  type EmployeeModule, type EmployeePermissions, type ModuleAccess,
+} from "./types";
 
 export function getAdminApp() {
   const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID;
@@ -27,6 +31,45 @@ export async function authenticatedShop(request: Request): Promise<string | null
   } catch {
     return null;
   }
+}
+
+export type WorkspaceActor = {
+  uid: string;
+  shopId: string;
+  role: "admin" | "employee";
+  permissions: EmployeePermissions;
+};
+
+export async function authenticatedActor(request: Request): Promise<WorkspaceActor | null> {
+  const uid = await authenticatedShop(request);
+  if (!uid) return null;
+
+  const profile = await adminDatabase().doc(`users/${uid}`).get();
+  if (!profile.exists) {
+    return { uid, shopId: uid, role: "admin", permissions: ADMIN_PERMISSIONS };
+  }
+
+  const data = profile.data();
+  if (data?.role !== "employee" || data.active !== true || typeof data.shopId !== "string") return null;
+  return {
+    uid,
+    shopId: data.shopId,
+    role: "employee",
+    permissions: { ...NO_EMPLOYEE_PERMISSIONS, ...data.permissions } as EmployeePermissions,
+  };
+}
+
+export function actorHasAccess(
+  actor: WorkspaceActor,
+  module: EmployeeModule,
+  access: ModuleAccess,
+): boolean {
+  if (actor.role === "admin") return true;
+  const level = actor.permissions[module];
+  if (access === "edit") return level === "edit";
+  if (level === "view" || level === "edit") return true;
+  return (module === "sales" || module === "services")
+    && (actor.permissions.reports === "view" || actor.permissions.reports === "edit");
 }
 
 export function adminDatabase() {

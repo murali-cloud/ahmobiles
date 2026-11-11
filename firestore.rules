@@ -5,35 +5,76 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == shopId;
     }
 
+    function employeeProfilePath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function isActiveEmployee(shopId) {
+      return request.auth != null
+        && request.auth.uid != shopId
+        && exists(employeeProfilePath())
+        && get(employeeProfilePath()).data.role == 'employee'
+        && get(employeeProfilePath()).data.active == true
+        && get(employeeProfilePath()).data.shopId == shopId;
+    }
+
+    function canReadModule(shopId, module) {
+      return ownsShop(shopId)
+        || (isActiveEmployee(shopId)
+          && (get(employeeProfilePath()).data.permissions.get(module, 'none') in ['view', 'edit']
+            || (module in ['sales', 'services']
+              && get(employeeProfilePath()).data.permissions.reports in ['view', 'edit'])));
+    }
+
+    function canEditModule(shopId, module) {
+      return ownsShop(shopId)
+        || (isActiveEmployee(shopId)
+          && get(employeeProfilePath()).data.permissions.get(module, 'none') == 'edit');
+    }
+
+    match /users/{userId} {
+      allow get: if request.auth != null && request.auth.uid == userId;
+      allow list, write: if false;
+    }
+
     match /shops/{shopId} {
       allow read, create, update: if ownsShop(shopId);
       allow delete: if false;
 
-      match /customers/{customerId} {
-        allow read, create, update: if ownsShop(shopId);
-        allow delete: if false;
-      }
-
-      match /sales/{saleId} {
+      match /employees/{employeeId} {
         allow read: if ownsShop(shopId);
         allow write: if false;
       }
 
+      match /customers/{customerId} {
+        allow read: if canReadModule(shopId, 'customers');
+        allow create, update: if canEditModule(shopId, 'customers');
+        allow delete: if false;
+      }
+
+      match /sales/{saleId} {
+        allow read: if canReadModule(shopId, 'sales');
+        allow write: if false;
+      }
+
       match /services/{serviceId} {
-        allow read: if ownsShop(shopId);
+        allow read: if canReadModule(shopId, 'services');
         allow create, delete: if false;
-        allow update: if ownsShop(shopId)
+        allow update: if canEditModule(shopId, 'services')
           && request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['status', 'readyAt', 'deliveryOutDate', 'deliveryOutPerson', 'deliveryRemarks']);
       }
 
       match /settings/{settingId} {
-        allow read, create, update: if ownsShop(shopId);
+        allow read: if canReadModule(shopId, 'settings');
+        allow create, update: if canEditModule(shopId, 'settings');
         allow delete: if false;
       }
 
       match /payments/{paymentId} {
-        allow read: if ownsShop(shopId);
+        allow read: if ownsShop(shopId)
+          || (resource.data.relatedType == 'SALE' && canReadModule(shopId, 'sales'))
+          || (resource.data.relatedType == 'SERVICE' && canReadModule(shopId, 'services'));
         allow write: if false;
       }
 
@@ -42,7 +83,10 @@ service cloud.firestore {
       }
 
       match /activityLogs/{logId} {
-        allow read: if ownsShop(shopId);
+        allow read: if ownsShop(shopId)
+          || (resource.data.relatedType == 'SALE' && canReadModule(shopId, 'sales'))
+          || (resource.data.relatedType == 'SERVICE' && canReadModule(shopId, 'services'))
+          || (resource.data.relatedType == 'CUSTOMER' && canReadModule(shopId, 'customers'));
         allow write: if false;
       }
     }

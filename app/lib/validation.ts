@@ -3,8 +3,8 @@ import { z } from "zod";
 const money = z.coerce.number().finite().min(0, "Enter a valid amount.");
 const phone = z.string().trim().min(7, "Enter a valid contact number.").max(20);
 
-export const credentialsSchema = z.object({
-  email: z.string().trim().email("Enter a valid email address."),
+export const loginSchema = z.object({
+  username: z.string().trim().min(3, "Enter your username or email."),
   password: z.string().min(8, "Use at least 8 characters."),
 });
 
