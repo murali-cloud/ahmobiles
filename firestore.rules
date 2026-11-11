@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function ownsShop(shopId) {
+      return request.auth != null && request.auth.uid == shopId;
+    }
+
+    match /shops/{shopId} {
+      allow read, create, update: if ownsShop(shopId);
+      allow delete: if false;
+
+      match /customers/{customerId} {
+        allow read, create, update: if ownsShop(shopId);
+        allow delete: if false;
+      }
+
+      match /sales/{saleId} {
+        allow read: if ownsShop(shopId);
+        allow write: if false;
+      }
+
+      match /services/{serviceId} {
+        allow read: if ownsShop(shopId);
+        allow create, delete: if false;
+        allow update: if ownsShop(shopId)
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'readyAt', 'deliveryOutDate', 'deliveryOutPerson', 'deliveryRemarks']);
+      }
+
+      match /settings/{settingId} {
+        allow read, create, update: if ownsShop(shopId);
+        allow delete: if false;
+      }
+
+      match /payments/{paymentId} {
+        allow read: if ownsShop(shopId);
+        allow write: if false;
+      }
+
+      match /counters/{counterId} {
+        allow read, write: if false;
+      }
+
+      match /activityLogs/{logId} {
+        allow read: if ownsShop(shopId);
+        allow write: if false;
+      }
+    }
+  }
+}

@@ -1,0 +1,61 @@
+import type { Customer, Sale, ServiceJob, ShopSettings, WorkspaceData } from "./types";
+import { DEFAULT_SETTINGS, EMPTY_WORKSPACE } from "./types";
+
+const STORAGE_KEY = "ahmobiles.workspace.v1";
+
+export function readLocalWorkspace(): WorkspaceData {
+  try {
+    const saved = window.localStorage.getItem(STORAGE_KEY);
+    if (!saved) return EMPTY_WORKSPACE;
+    const parsed: Partial<WorkspaceData> = JSON.parse(saved);
+    return {
+      sales: parsed.sales ?? [],
+      services: parsed.services ?? [],
+      customers: parsed.customers ?? [],
+      settings: { ...DEFAULT_SETTINGS, ...parsed.settings },
+    };
+  } catch (error) {
+    console.error("Could not load the local workspace.", error);
+    throw new Error("Your browser workspace could not be read. Clear its saved data or connect Firebase.");
+  }
+}
+
+export function writeLocalWorkspace(data: WorkspaceData): void {
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+}
+
+export function makeCustomer(name: string, phone: string, customers: Customer[]): Customer {
+  const existing = customers.find((customer) => customer.phone.replace(/\D/g, "") === phone.replace(/\D/g, ""));
+  return existing ?? { id: crypto.randomUUID(), name, phone, createdAt: new Date().toISOString() };
+}
+
+export function nextInvoiceNumber(kind: "sales" | "services", prefix: string, records: Array<Sale | ServiceJob>): string {
+  const year = Number(new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata", year: "numeric",
+  }).format(new Date()));
+  const field = kind === "sales" ? "invoiceNumber" : "serviceNumber";
+  const current = records.reduce((highest, record) => {
+    const value = record[field as keyof typeof record];
+    if (typeof value !== "string") return highest;
+    const match = value.match(new RegExp(`^${prefix}-${year}-(\\d+)$`));
+    return match ? Math.max(highest, Number(match[1])) : highest;
+  }, 0);
+  return `${prefix}-${year}-${String(current + 1).padStart(4, "0")}`;
+}
+
+export function updateLocalRecord(
+  data: WorkspaceData,
+  kind: "sales" | "services" | "customers",
+  id: string,
+  record: Sale | ServiceJob | Customer,
+): WorkspaceData {
+  const records = data[kind] as Array<Sale | ServiceJob | Customer>;
+  const updated = records.some((item) => item.id === id)
+    ? records.map((item) => item.id === id ? record : item)
+    : [record, ...records];
+  return { ...data, [kind]: updated };
+}
+
+export function patchSettings(data: WorkspaceData, settings: ShopSettings): WorkspaceData {
+  return { ...data, settings };
+}

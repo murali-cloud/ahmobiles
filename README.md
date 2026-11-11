@@ -1,36 +1,73 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# A&H Mobiles Shop Manager
 
-## Getting Started
+A mobile-first Next.js app for mobile-shop sales, repair intake, service tracking,
+customers, payments, reports, and printable invoices.
 
-First, run the development server:
+## Requirements
 
-```bash
+- Node.js 22 or later
+- A Firebase project with Email/Password Authentication and Cloud Firestore
+- A Firebase Admin service account for trusted invoice, payment, and service-status operations
+
+## Run locally
+
+```powershell
+npm install
+Copy-Item .env.example .env.local
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000). Without Firebase browser
+configuration, the app opens in **Local preview** mode and saves only to this
+browser. Do not enter real customer or payment information in preview mode.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Configure Firebase
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Create a Firebase project and register a Web app.
+2. Enable **Authentication → Sign-in method → Email/Password**.
+3. Create a Cloud Firestore database.
+4. Put the Web app's API key, auth domain, project ID, and app ID in the
+   `NEXT_PUBLIC_FIREBASE_*` values in `.env.local`.
+5. Create a service account with only the required Firebase Authentication
+   verification and Firestore access. Set `FIREBASE_ADMIN_PROJECT_ID`,
+   `FIREBASE_ADMIN_CLIENT_EMAIL`, and `FIREBASE_ADMIN_PRIVATE_KEY` on the server.
+   The private key is server-only; preserve its newlines (or use `\n` escapes).
+   On Google Cloud, prefer the platform's workload identity/application default
+   credentials and adapt `app/lib/firebase-admin.ts` rather than storing a key.
+6. Deploy `firestore.rules` and `firestore.indexes.json`:
 
-## Learn More
+   ```powershell
+   firebase deploy --only firestore:rules,firestore:indexes
+   ```
 
-To learn more about Next.js, take a look at the following resources:
+7. Restart the Next.js server after changing environment variables. Sign up with
+   the account that will own the shop workspace.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Shop records are scoped to the authenticated user's UID. Financial record
+creation, sequence allocation, and payment/status mutations go through the
+server route at `app/api/records/route.ts`; Firestore rules prevent browser-side
+invoice, counter, and payment writes. Review the rules and service-account
+permissions before production deployment.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Workflows
 
-## Deploy on Vercel
+- **Sales:** product rows, line and invoice discounts, optional tax, initial and
+  follow-up payments, searchable history, live preview, A4 PDF, and printing.
+- **Services:** intake details and condition, service charge and discount,
+  status tracking, optional later amount-only payments, ready-for-pickup list,
+  handover details/history, receipt PDF and thermal printing. The app
+  deliberately has no device-password or pattern fields; never put unlock
+  credentials in notes.
+- **Customers:** customer directory, deduplication by contact number, and
+  associated sale and repair history.
+- **Reports:** date range, revenue and collection totals, service status, and CSV
+  export. The dashboard revenue chart also supports a custom date range.
+- **Settings:** shop details and GSTIN, PNG/JPEG logo on invoices, invoice prefixes/footer, and A4 or 80 mm thermal printing.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Verification
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```powershell
+npx tsc --noEmit
+npm run lint
+npm run build
+```
