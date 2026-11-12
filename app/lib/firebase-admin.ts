@@ -36,17 +36,35 @@ export async function authenticatedShop(request: Request): Promise<string | null
 export type WorkspaceActor = {
   uid: string;
   shopId: string;
+  username: string;
   role: "admin" | "employee";
   permissions: EmployeePermissions;
 };
 
+async function authenticatedClaims(request: Request) {
+  const token = request.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1];
+  if (!token) return null;
+  try {
+    return await getAuth(getAdminApp()).verifyIdToken(token);
+  } catch {
+    return null;
+  }
+}
+
 export async function authenticatedActor(request: Request): Promise<WorkspaceActor | null> {
-  const uid = await authenticatedShop(request);
-  if (!uid) return null;
+  const claims = await authenticatedClaims(request);
+  if (!claims) return null;
+  const uid = claims.uid;
 
   const profile = await adminDatabase().doc(`users/${uid}`).get();
   if (!profile.exists) {
-    return { uid, shopId: uid, role: "admin", permissions: ADMIN_PERMISSIONS };
+    return {
+      uid,
+      shopId: uid,
+      username: claims.email?.split("@")[0] || "admin",
+      role: "admin",
+      permissions: ADMIN_PERMISSIONS,
+    };
   }
 
   const data = profile.data();
@@ -54,6 +72,7 @@ export async function authenticatedActor(request: Request): Promise<WorkspaceAct
   return {
     uid,
     shopId: data.shopId,
+    username: String(data.username || claims.email?.split("@")[0] || "employee"),
     role: "employee",
     permissions: { ...NO_EMPLOYEE_PERMISSIONS, ...data.permissions } as EmployeePermissions,
   };
@@ -68,6 +87,8 @@ export function actorHasAccess(
   const level = actor.permissions[module];
   if (access === "edit") return level === "edit";
   if (level === "view" || level === "edit") return true;
+  if (actor.permissions.overview !== "none" && ["sales", "services", "customers"].includes(module)) return true;
+  if (module === "services" && actor.permissions.ready !== "none") return true;
   return (module === "sales" || module === "services")
     && (actor.permissions.reports === "view" || actor.permissions.reports === "edit");
 }

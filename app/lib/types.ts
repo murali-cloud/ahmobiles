@@ -2,8 +2,10 @@ export type PaymentStatus = "Paid" | "Partially paid" | "Unpaid";
 export type ServiceStatus = "Received" | "In progress" | "Ready" | "Returned";
 
 export const EMPLOYEE_MODULES = [
+  { key: "overview", label: "Overview" },
   { key: "sales", label: "Sales" },
   { key: "services", label: "Services" },
+  { key: "ready", label: "Ready for delivery" },
   { key: "customers", label: "Customers" },
   { key: "reports", label: "Reports" },
   { key: "settings", label: "Shop settings" },
@@ -31,16 +33,20 @@ export type WorkspaceIdentity = {
 };
 
 export const NO_EMPLOYEE_PERMISSIONS: EmployeePermissions = {
+  overview: "none",
   sales: "none",
   services: "none",
+  ready: "none",
   customers: "none",
   reports: "none",
   settings: "none",
 };
 
 export const ADMIN_PERMISSIONS: EmployeePermissions = {
+  overview: "edit",
   sales: "edit",
   services: "edit",
+  ready: "edit",
   customers: "edit",
   reports: "edit",
   settings: "edit",
@@ -109,8 +115,10 @@ export type ServiceJob = {
   readyAt?: string;
   deliveryOutDate?: string;
   deliveryOutPerson?: string;
+  deliveryOutStaff?: string;
+  deliveryOutStaffId?: string;
   deliveryRemarks?: string;
-  deliveryHistory?: Array<{ date: string; person: string; remarks: string }>;
+  deliveryHistory?: Array<{ date: string; person: string; staff?: string; staffId?: string; remarks: string }>;
   createdAt: string;
 };
 
@@ -145,7 +153,7 @@ export const DEFAULT_SETTINGS: ShopSettings = {
   invoicePaperSize: "A4",
   invoiceFooter: "Thank you for choosing A&H Mobiles.",
   salesPrefix: "SAL",
-  servicePrefix: "SRV",
+  servicePrefix: "SERV",
 };
 
 export const EMPTY_WORKSPACE: WorkspaceData = {

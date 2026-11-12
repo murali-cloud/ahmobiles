@@ -22,8 +22,27 @@ service cloud.firestore {
       return ownsShop(shopId)
         || (isActiveEmployee(shopId)
           && (get(employeeProfilePath()).data.permissions.get(module, 'none') in ['view', 'edit']
+            || (module in ['sales', 'services', 'customers']
+              && get(employeeProfilePath()).data.permissions.get('overview', 'none') in ['view', 'edit'])
+            || (module == 'services'
+              && get(employeeProfilePath()).data.permissions.get('ready', 'none') in ['view', 'edit'])
             || (module in ['sales', 'services']
               && get(employeeProfilePath()).data.permissions.reports in ['view', 'edit'])));
+    }
+
+    function canReadAllServices(shopId) {
+      return ownsShop(shopId)
+        || (isActiveEmployee(shopId)
+          && (get(employeeProfilePath()).data.permissions.get('services', 'none') in ['view', 'edit']
+            || get(employeeProfilePath()).data.permissions.get('overview', 'none') in ['view', 'edit']
+            || get(employeeProfilePath()).data.permissions.get('reports', 'none') in ['view', 'edit']));
+    }
+
+    function canReadServiceRecord(shopId, serviceId) {
+      return canReadAllServices(shopId)
+        || (isActiveEmployee(shopId)
+          && get(employeeProfilePath()).data.permissions.get('ready', 'none') in ['view', 'edit']
+          && get(/databases/$(database)/documents/shops/$(shopId)/services/$(serviceId)).data.status == 'Ready');
     }
 
     function canEditModule(shopId, module) {
@@ -58,7 +77,10 @@ service cloud.firestore {
       }
 
       match /services/{serviceId} {
-        allow read: if canReadModule(shopId, 'services');
+        allow read: if canReadAllServices(shopId)
+          || (isActiveEmployee(shopId)
+            && get(employeeProfilePath()).data.permissions.get('ready', 'none') in ['view', 'edit']
+            && resource.data.status == 'Ready');
         allow create, delete: if false;
         allow update: if canEditModule(shopId, 'services')
           && request.resource.data.diff(resource.data).affectedKeys()
@@ -74,7 +96,7 @@ service cloud.firestore {
       match /payments/{paymentId} {
         allow read: if ownsShop(shopId)
           || (resource.data.relatedType == 'SALE' && canReadModule(shopId, 'sales'))
-          || (resource.data.relatedType == 'SERVICE' && canReadModule(shopId, 'services'));
+          || (resource.data.relatedType == 'SERVICE' && canReadServiceRecord(shopId, resource.data.relatedDocumentId));
         allow write: if false;
       }
 
@@ -85,7 +107,7 @@ service cloud.firestore {
       match /activityLogs/{logId} {
         allow read: if ownsShop(shopId)
           || (resource.data.relatedType == 'SALE' && canReadModule(shopId, 'sales'))
-          || (resource.data.relatedType == 'SERVICE' && canReadModule(shopId, 'services'))
+          || (resource.data.relatedType == 'SERVICE' && canReadServiceRecord(shopId, resource.data.relatedDocumentId))
           || (resource.data.relatedType == 'CUSTOMER' && canReadModule(shopId, 'customers'));
         allow write: if false;
       }
