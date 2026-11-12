@@ -238,7 +238,13 @@ export async function writeSettings(uid: string, settings: ShopSettings): Promis
   await setDoc(doc(getFirestore(getFirebaseApp()), "shops", uid, "settings", "profile"), settings);
 }
 
-type NewRecord = Omit<Sale, "id" | "invoiceNumber"> | Omit<ServiceJob, "id" | "serviceNumber">;
+type NewRecord =
+  | Omit<Sale, "id">
+  | (Omit<ServiceJob, "id" | "serviceNumber"> & { serviceNumber?: string });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 export async function createNumberedRecord(
   uid: string,
@@ -252,9 +258,28 @@ export async function createNumberedRecord(
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({ kind, prefix, record }),
   });
-  const result = await response.json() as { id?: string; number?: string; error?: string };
-  if (!response.ok || !result.id || !result.number) throw new Error(result.error || "The invoice could not be saved.");
-  return { id: result.id, number: result.number };
+  const responseBody = await response.text();
+  if (!responseBody.trim()) {
+    throw new Error(`The server returned an empty response while saving the invoice (HTTP ${response.status}). Check the sales list before trying again.`);
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(responseBody);
+  } catch {
+    throw new Error(`The server returned an invalid response while saving the invoice (HTTP ${response.status}).`);
+  }
+  if (!isRecord(payload)) {
+    throw new Error(`The server returned an invalid response while saving the invoice (HTTP ${response.status}).`);
+  }
+
+  if (!response.ok) {
+    throw new Error(typeof payload.error === "string" ? payload.error : `The invoice could not be saved (HTTP ${response.status}).`);
+  }
+  if (typeof payload.id !== "string" || typeof payload.number !== "string") {
+    throw new Error(`The server did not confirm the invoice was saved (HTTP ${response.status}). Check the sales list before trying again.`);
+  }
+  return { id: payload.id, number: payload.number };
 }
 
 export async function writeRecord(

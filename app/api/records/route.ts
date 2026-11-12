@@ -32,6 +32,7 @@ const commonSchema = {
 
 const saleSchema = z.object({
   ...commonSchema,
+  invoiceNumber: z.string().trim().min(1).max(120).optional(),
   invoiceDate: z.string().datetime(),
   products: z.array(productSchema).min(1).max(80),
   subtotal: z.number().finite().min(0),
@@ -157,7 +158,9 @@ export async function POST(request: Request) {
     const counterRef = db.doc(`shops/${uid}/counters/${kind}-${year}`);
     const recordRef = db.doc(`shops/${uid}/${kind}/${recordId}`);
     const customerRef = db.doc(`shops/${uid}/customers/${customerId}`);
+    const requestedInvoiceNumber = kind === "sales" ? record.invoiceNumber?.trim() : undefined;
     const requestedServiceNumber = kind === "services" ? record.serviceNumber?.trim() : undefined;
+    const requestedNumber = requestedInvoiceNumber || requestedServiceNumber;
     const invoiceNumber = await db.runTransaction(async (transaction) => {
       const [counterSnapshot, customerSnapshot, matchingCustomers] = await Promise.all([
         transaction.get(counterRef),
@@ -167,7 +170,11 @@ export async function POST(request: Request) {
       const matchingServiceNumbers = requestedServiceNumber
         ? await transaction.get(db.collection(`shops/${uid}/services`).where("serviceNumber", "==", requestedServiceNumber).limit(1))
         : undefined;
+      const matchingInvoiceNumbers = requestedInvoiceNumber
+        ? await transaction.get(db.collection(`shops/${uid}/sales`).where("invoiceNumber", "==", requestedInvoiceNumber).limit(1))
+        : undefined;
       if (matchingServiceNumbers?.size) throw new Error("SERVICE_NUMBER_EXISTS");
+      if (matchingInvoiceNumbers?.size) throw new Error("INVOICE_NUMBER_EXISTS");
       const existingCustomer = customerSnapshot.exists ? customerSnapshot : matchingCustomers.docs[0];
       const resolvedCustomerRef = existingCustomer?.ref ?? customerRef;
       const resolvedCustomerId = resolvedCustomerRef.id;
@@ -191,9 +198,9 @@ export async function POST(request: Request) {
       if (!Number.isSafeInteger(current) || current < 0) throw new Error("COUNTER_INVALID");
       const next = current + 1;
       const generatedNumber = `${prefix}-${year}-${String(next).padStart(4, "0")}`;
-      const number = requestedServiceNumber || generatedNumber;
-      const requestedSequence = requestedServiceNumber
-        ? Number(requestedServiceNumber.match(new RegExp(`^${prefix}-${year}-(\\d+)$`))?.[1] ?? 0)
+      const number = requestedNumber || generatedNumber;
+      const requestedSequence = requestedNumber
+        ? Number(requestedNumber.match(new RegExp(`^${prefix}-${year}-(\\d+)$`))?.[1] ?? 0)
         : 0;
       const common = {
         ...record,
@@ -223,7 +230,7 @@ export async function POST(request: Request) {
         });
       }
       transaction.set(counterRef, {
-        value: requestedServiceNumber ? Math.max(current, requestedSequence) : next,
+        value: requestedNumber ? Math.max(current, requestedSequence) : next,
         updatedAt: FieldValue.serverTimestamp(),
       });
       for (const payment of initialPayments) {
@@ -247,6 +254,9 @@ export async function POST(request: Request) {
     }
     if (error instanceof Error && error.message === "SERVICE_NUMBER_EXISTS") {
       return responseError("That service bill number is already in use.", 409);
+    }
+    if (error instanceof Error && error.message === "INVOICE_NUMBER_EXISTS") {
+      return responseError("That invoice number is already in use.", 409);
     }
     if (error instanceof Error && error.message === "COUNTER_INVALID") {
       return responseError("The invoice sequence is invalid. Contact your administrator.", 500);

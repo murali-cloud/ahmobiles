@@ -238,7 +238,10 @@ export default function Workspace() {
     return complete;
   }, [data, persist, user]);
 
-  const saveSale = useCallback(async (draft: Omit<Sale, "id" | "invoiceNumber">): Promise<Sale> => {
+  const saveSale = useCallback(async (draft: Omit<Sale, "id">): Promise<Sale> => {
+    if (data.sales.some((sale) => sale.invoiceNumber === draft.invoiceNumber.trim())) {
+      throw new Error("That invoice number is already in use.");
+    }
     const customer = await saveCustomer(draft.customerName, draft.contactNumber);
     if (firebaseConfigured && user) {
       const created = await createNumberedRecord(user.shopId, "sales", data.settings.salesPrefix || "SAL", {
@@ -250,7 +253,7 @@ export default function Workspace() {
       return sale;
     }
     const id = newId();
-    const invoiceNumber = nextInvoiceNumber("sales", data.settings.salesPrefix || "SAL", data.sales);
+    const invoiceNumber = draft.invoiceNumber.trim();
     const sale: Sale = { ...draft, id, invoiceNumber, customerId: customer.id };
     const customers = data.customers.some((item) => item.id === customer.id) ? data.customers : [customer, ...data.customers];
     await persist({ ...data, customers, sales: [sale, ...data.sales] });
@@ -890,10 +893,85 @@ function SalesPage({ sales, search, onSearch, onCreate, onView, onPayment, setti
     : b.invoiceDate.localeCompare(a.invoiceDate));
   const pageSize = 8;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const exportSalesPdf = () => {
+    const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 10;
+    const columns = [
+      { title: "INVOICE", width: 28 },
+      { title: "CUSTOMER", width: 34 },
+      { title: "CUSTOMER NUMBER", width: 28 },
+      { title: "PRODUCTS", width: 23 },
+      { title: "DATE", width: 22 },
+      { title: "TOTAL", width: 30 },
+      { title: "PAID", width: 30 },
+      { title: "STATUS", width: 24 },
+    ];
+    const billed = filtered.reduce((sum, sale) => sum + sale.finalAmount, 0);
+    const collected = filtered.reduce((sum, sale) => sum + paymentTotal(sale.payments), 0);
+    const balance = filtered.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0);
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(16);
+    pdf.text("Sales Report", margin, 13);
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(9);
+    pdf.text(`Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`, margin, 20);
+    pdf.text(`Invoices: ${filtered.length}  |  Billed: ${pdfMoney(billed)}  |  Paid: ${pdfMoney(collected)}  |  Balance: ${pdfMoney(balance)}`, margin, 26);
+
+    const drawTableHeader = (y: number) => {
+      pdf.setFillColor(238, 242, 248);
+      pdf.rect(margin, y - 4, columns.reduce((sum, column) => sum + column.width, 0), 7, "F");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(7);
+      let x = margin;
+      columns.forEach((column) => {
+        pdf.text(column.title, x + 1, y);
+        x += column.width;
+      });
+      pdf.setFont("helvetica", "normal");
+      return y + 6;
+    };
+    let y = drawTableHeader(34);
+    filtered.forEach((sale) => {
+      const paid = paymentTotal(sale.payments);
+      const values = [
+        sale.invoiceNumber,
+        sale.customerName,
+        sale.contactNumber,
+        `${sale.products.length} item${sale.products.length === 1 ? "" : "s"}`,
+        dateLabel(sale.invoiceDate),
+        pdfMoney(sale.finalAmount),
+        pdfMoney(paid),
+        statusOf(sale.finalAmount, paid),
+      ];
+      const lines = values.map((value, index) => pdf.splitTextToSize(value || "—", columns[index].width - 2) as string[]);
+      const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
+      if (y + rowHeight > pageHeight - 12) {
+        pdf.addPage();
+        y = drawTableHeader(14);
+      }
+      let x = margin;
+      lines.forEach((cellLines, index) => {
+        pdf.text(cellLines, x + 1, y, { maxWidth: columns[index].width - 2 });
+        x += columns[index].width;
+      });
+      y += rowHeight;
+      pdf.setDrawColor(225, 230, 238);
+      pdf.line(margin, y - 2, margin + columns.reduce((sum, column) => sum + column.width, 0), y - 2);
+    });
+    const pageCount = pdf.getNumberOfPages();
+    for (let page = 1; page <= pageCount; page += 1) {
+      pdf.setPage(page);
+      pdf.setFontSize(8);
+      pdf.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 5, { align: "right" });
+    }
+    pdf.save(`sales-report-${dateInputValue()}.pdf`);
+  };
   return <>
-    <PageHeader eyebrow="RETAIL" title="Sales" description="Create invoices, track payments, and keep every sale in one place.">{canEdit && <Button onClick={onCreate}><Plus size={16} /> Create sales bill</Button>}</PageHeader>
+    <PageHeader eyebrow="RETAIL" title="Sales" description="Create invoices, track payments, and keep every sale in one place."><Button variant="secondary" onClick={exportSalesPdf}><Download size={15} /> Export PDF</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> Create sales bill</Button>}</PageHeader>
     <div className="page-stat-row"><span className="stat-pill"><FileText size={15} /><strong>{sales.length}</strong> invoices</span><span className="stat-pill"><ArrowUpRight size={15} /><strong>{money(sales.reduce((sum, sale) => sum + sale.finalAmount, 0))}</strong> billed</span><span className="stat-pill"><Clock3 size={15} /><strong>{money(sales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0))}</strong> due</span></div>
-    <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search invoice, customer or phone…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All statuses</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option></select><ChevronDown size={14} /></label><input aria-label="Sales from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /><input aria-label="Sales to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
+    <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search invoice, customer or phone…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All statuses</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option></select><ChevronDown size={14} /></label><div className="date-range compact-date-range"><label>From<input aria-label="Sales from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /></label><label>To<input aria-label="Sales to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /></label></div><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
       {filtered.length ? <SalesTable sales={filtered.slice((page - 1) * pageSize, page * pageSize)} onView={onView} onPayment={canEdit ? onPayment : undefined} settings={settings} /> :
         <EmptyState icon={CreditCard} title={search || paymentFilter !== "All statuses" ? "No matching invoices" : "Ready for your first sale?"} detail={sales.length ? "Try a different search or payment status." : "Create a sales bill and your invoices will appear here."} action={!sales.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> Create sales bill</Button> : undefined} />}
       {filtered.length > 0 && <Pagination page={page} pages={pages} total={filtered.length} pageSize={pageSize} onPage={setPage} />}
@@ -916,29 +994,30 @@ function SalesTable({ sales, compact = false, canOpen = true, onView, onPayment,
 }
 
 function SaleForm({ data, busy, onSubmit, onCancel }: {
-  data: WorkspaceData; busy: boolean; onSubmit: (draft: Omit<Sale, "id" | "invoiceNumber">) => Promise<Sale | undefined>; onCancel: () => void;
+  data: WorkspaceData; busy: boolean; onSubmit: (draft: Omit<Sale, "id">) => Promise<Sale | undefined>; onCancel: () => void;
 }) {
   const [products, setProducts] = useState<ProductLine[]>([{ id: newId(), brand: "", model: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
-  const [discount, setDiscount] = useState(0);
   const [tax, setTax] = useState(0);
   const [paid, setPaid] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState(false);
+  const generatedInvoiceNumber = nextInvoiceNumber("sales", data.settings.salesPrefix || "SAL", data.sales);
   const { register, handleSubmit, control, formState: { errors } } = useForm({
     resolver: zodResolver(saleSchema.omit({ products: true })),
-    defaultValues: { customerName: "", contactNumber: "", invoiceDate: dateInputValue(), discount: 0, tax: 0, amountPaid: 0 },
+    defaultValues: { customerName: "", contactNumber: "", invoiceDate: dateInputValue(), invoiceNumber: generatedInvoiceNumber, discount: 0, tax: 0, amountPaid: 0 },
   });
   const name = useWatch({ control, name: "customerName" });
   const phone = useWatch({ control, name: "contactNumber" });
   const invoiceDate = useWatch({ control, name: "invoiceDate" });
+  const invoiceNumber = useWatch({ control, name: "invoiceNumber" });
   const total = products.reduce((sum, product) => sum + Math.max(0, product.quantity * product.rate - product.discount), 0);
-  const final = Math.max(0, total - discount + tax);
+  const final = Math.max(0, total + tax);
   const matchingCustomer = data.customers.find((customer) => phone && customer.phone.replace(/\D/g, "") === phone.replace(/\D/g, ""));
   const addProduct = () => setProducts((current) => [...current, { id: newId(), brand: "", model: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
   const updateProduct = (id: string, key: keyof ProductLine, value: string | number) => setProducts((current) => current.map((item) => item.id === id ? { ...item, [key]: value } : item));
-  const saveDraft = async (form: { customerName: string; contactNumber: string; invoiceDate: string }, printAfterSave = false) => {
+  const saveDraft = async (form: { customerName: string; contactNumber: string; invoiceDate: string; invoiceNumber: string }, printAfterSave = false) => {
     setFieldErrors({});
-    const parsed = saleSchema.safeParse({ ...form, products, discount, tax, amountPaid: paid });
+    const parsed = saleSchema.safeParse({ ...form, products, discount: 0, tax, amountPaid: paid });
     if (!parsed.success) {
       const nextErrors: Record<string, string> = {};
       for (const issue of parsed.error.issues) nextErrors[String(issue.path[0])] = issue.message;
@@ -949,6 +1028,11 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
       setFieldErrors(nextErrors);
       return;
     }
+    const trimmedInvoiceNumber = form.invoiceNumber.trim();
+    if (data.sales.some((sale) => sale.invoiceNumber === trimmedInvoiceNumber)) {
+      setFieldErrors({ invoiceNumber: "That invoice number is already in use." });
+      return;
+    }
     if (paid > final) {
       setFieldErrors({ amountPaid: "Amount paid cannot exceed the final amount." });
       return;
@@ -956,13 +1040,14 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
     const customer = data.customers.find((item) => item.phone.replace(/\D/g, "") === form.contactNumber.replace(/\D/g, ""));
     const payments: Payment[] = paid ? [{ id: newId(), amount: paid, date: new Date().toISOString(), notes: "Payment at sale" }] : [];
     const saved = await onSubmit({
+      invoiceNumber: trimmedInvoiceNumber,
       customerId: customer?.id ?? "",
       customerName: form.customerName.trim(),
       contactNumber: form.contactNumber.trim(),
       invoiceDate: businessDateTime(form.invoiceDate),
       products: products.map((item) => ({ ...item })),
       subtotal: total,
-      discount,
+      discount: 0,
       tax,
       finalAmount: final,
       payments,
@@ -973,9 +1058,9 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
   const submit = handleSubmit((form) => saveDraft(form));
   const submitAndPrint = handleSubmit((form) => saveDraft(form, true));
   const draftSale: Sale = {
-    id: "", invoiceNumber: nextInvoiceNumber("sales", data.settings.salesPrefix || "SAL", data.sales),
+    id: "", invoiceNumber: invoiceNumber || generatedInvoiceNumber,
     customerId: "", customerName: name || "Customer name", contactNumber: phone || "",
-    invoiceDate, products, subtotal: total, discount, tax, finalAmount: final,
+    invoiceDate, products, subtotal: total, discount: 0, tax, finalAmount: final,
     payments: paid ? [{ id: "preview", amount: paid, date: new Date().toISOString() }] : [], createdAt: new Date().toISOString(),
   };
   return <>
@@ -983,16 +1068,16 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
     <form className="billing-layout" onSubmit={submit} noValidate>
       <div className="billing-main">
         <section className="panel form-panel"><div className="form-section-head"><span className="step-number">01</span><div><h2>Customer details</h2><p>Who is this invoice for?</p></div></div>
-          <div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} />{matchingCustomer && <span className="field-hint"><CheckCircle2 size={13} /> Existing customer: {matchingCustomer.name}</span>}</FormField><FormField label="Invoice date"><input className="input" type="date" {...register("invoiceDate")} /></FormField><FormField label="Invoice number"><div className="input read-only">{nextInvoiceNumber("sales", data.settings.salesPrefix || "SAL", data.sales)}<span>Auto-generated</span></div></FormField></div>
+          <div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} />{matchingCustomer && <span className="field-hint"><CheckCircle2 size={13} /> Existing customer: {matchingCustomer.name}</span>}</FormField><FormField label="Invoice date"><input className="input" type="date" {...register("invoiceDate")} /></FormField><FormField label="Invoice number" error={errors.invoiceNumber?.message ?? fieldErrors.invoiceNumber}><input className="input" maxLength={120} {...register("invoiceNumber")} /><span className="field-hint">Auto-generated; edit if needed.</span></FormField></div>
         </section>
         <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Products</h2><p>Add one or more devices to this sale.</p></div><Button variant="secondary" onClick={addProduct}><Plus size={15} /> Add product</Button></div>
           <div className="product-list">{products.map((product, index) => <div className="product-row" key={product.id}><div className="product-row-title"><span>Product {String(index + 1).padStart(2, "0")}</span>{products.length > 1 && <button className="remove-link" type="button" onClick={() => setProducts((items) => items.filter((item) => item.id !== product.id))}><X size={14} /> Remove</button>}</div><div className="form-grid product-fields"><FormField label="Brand"><input className="input" placeholder="Apple" value={product.brand} onChange={(event) => updateProduct(product.id, "brand", event.target.value)} /></FormField><FormField label="Model"><input className="input" placeholder="iPhone 15" value={product.model} onChange={(event) => updateProduct(product.id, "model", event.target.value)} /></FormField><FormField label="IMEI / Serial"><input className="input" placeholder="Optional" value={product.imei} onChange={(event) => updateProduct(product.id, "imei", event.target.value)} /></FormField><FormField label="Qty"><input className="input" type="number" min="1" value={product.quantity} onChange={(event) => updateProduct(product.id, "quantity", Number(event.target.value))} /></FormField><FormField label="Rate (₹)"><input className="input" type="number" min="0" value={product.rate || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "rate", Number(event.target.value))} /></FormField><FormField label="Discount (₹)"><input className="input" type="number" min="0" value={product.discount || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "discount", Number(event.target.value))} /></FormField><div className="line-total"><span>Line total</span><strong>{money(Math.max(0, product.quantity * product.rate - product.discount))}</strong></div></div></div>)}</div>
           {fieldErrors.products && <span className="field-error">{fieldErrors.products}</span>}
         </section>
-        <section className="panel form-panel"><div className="form-section-head"><span className="step-number">03</span><div><h2>Payment details</h2><p>Record the amount received today.</p></div></div><div className="form-grid two-col"><FormField label="Amount paid (₹)" error={fieldErrors.amountPaid}><input className="input" type="number" min="0" value={paid || ""} placeholder="0" onChange={(event) => setPaid(Number(event.target.value))} /></FormField><FormField label="Additional discount (₹)"><input className="input" type="number" min="0" value={discount || ""} placeholder="0" onChange={(event) => setDiscount(Number(event.target.value))} /></FormField><FormField label="Tax (₹), optional"><input className="input" type="number" min="0" value={tax || ""} placeholder="0" onChange={(event) => setTax(Number(event.target.value))} /></FormField></div></section>
+        <section className="panel form-panel"><div className="form-section-head"><span className="step-number">03</span><div><h2>Payment details</h2><p>Record the amount received today.</p></div></div><div className="form-grid two-col"><FormField label="Amount paid (₹)" error={fieldErrors.amountPaid}><input className="input" type="number" min="0" value={paid || ""} placeholder="0" onChange={(event) => setPaid(Number(event.target.value))} /></FormField><FormField label="Tax (₹), optional"><input className="input" type="number" min="0" value={tax || ""} placeholder="0" onChange={(event) => setTax(Number(event.target.value))} /></FormField></div></section>
         <div className="form-footer"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="secondary" onClick={() => setPreview(true)}><FileText size={15} /> Preview invoice</Button><Button variant="secondary" onClick={() => void submitAndPrint()} disabled={busy}><Printer size={15} /> Save & print</Button><Button type="submit" disabled={busy}>{busy ? "Saving…" : <><Check size={16} /> Save sales bill</>}</Button></div>
       </div>
-      <aside className="billing-side"><div className="panel total-card"><div className="total-card-title"><span className="total-icon"><CreditCard size={17} /></span><span><strong>Invoice summary</strong><small>Totals update as you go</small></span></div><div className="total-lines"><span>Subtotal <strong>{money(total)}</strong></span><span>Discount <strong>− {money(discount + products.reduce((sum, item) => sum + item.discount, 0))}</strong></span><span>Tax <strong>{money(tax)}</strong></span><div className="total-final"><span>Amount due</span><strong>{money(final)}</strong></div><span>Paid today <strong>{money(paid)}</strong></span></div><div className={`balance-box ${final - paid > 0 ? "" : "settled"}`}><span>{final - paid > 0 ? "Balance due" : "Fully paid"}</span><strong>{money(Math.max(0, final - paid))}</strong></div></div><div className="billing-tip"><ShieldCheck size={16} /><span>IMEI and product details stay with this invoice for easy reference.</span></div></aside>
+      <aside className="billing-side"><div className="panel total-card"><div className="total-card-title"><span className="total-icon"><CreditCard size={17} /></span><span><strong>Invoice summary</strong><small>Totals update as you go</small></span></div><div className="total-lines"><span>Subtotal <strong>{money(total)}</strong></span><span>Discount <strong>− {money(products.reduce((sum, item) => sum + item.discount, 0))}</strong></span><span>Tax <strong>{money(tax)}</strong></span><div className="total-final"><span>Amount due</span><strong>{money(final)}</strong></div><span>Paid today <strong>{money(paid)}</strong></span></div><div className={`balance-box ${final - paid > 0 ? "" : "settled"}`}><span>{final - paid > 0 ? "Balance due" : "Fully paid"}</span>{final - paid > 0 && <strong>{money(final - paid)}</strong>}</div></div><div className="billing-tip"><ShieldCheck size={16} /><span>IMEI and product details stay with this invoice for easy reference.</span></div></aside>
     </form>
     {preview && <InvoiceModal sale={draftSale} settings={data.settings} onClose={() => setPreview(false)} />}
   </>;
@@ -1101,13 +1186,88 @@ function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment,
     });
   const pageSize = 8;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const exportServicesPdf = () => {
+    const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 10;
+    const columns = [
+      { title: "SERVICE BILL NO.", width: 28 },
+      { title: "IN DATE", width: 22 },
+      { title: "IN CUSTOMER NAME", width: 34 },
+      { title: "MOBILE WITH MODEL", width: 37 },
+      { title: "CUSTOMER NUMBER", width: 28 },
+      { title: "STATUS", width: 23 },
+      { title: "DELIVERY DATE", width: 23 },
+      { title: "DELIVERY CUSTOMER", width: 36 },
+      { title: "SERVICE CHARGE", width: 28 },
+    ];
+    const orderedServices = filtered;
+    const serviceTotal = orderedServices.reduce((sum, service) => sum + service.serviceAmount, 0);
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(16);
+    pdf.text("Service Desk Report", margin, 13);
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(9);
+    pdf.text(`Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`, margin, 20);
+    pdf.text(`Jobs: ${orderedServices.length}  |  Service charges: ${pdfMoney(serviceTotal)}`, margin, 26);
+
+    const drawTableHeader = (y: number) => {
+      pdf.setFillColor(238, 242, 248);
+      pdf.rect(margin, y - 4, columns.reduce((sum, column) => sum + column.width, 0), 7, "F");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(7);
+      let x = margin;
+      columns.forEach((column) => {
+        pdf.text(column.title, x + 1, y);
+        x += column.width;
+      });
+      pdf.setFont("helvetica", "normal");
+      return y + 6;
+    };
+    let y = drawTableHeader(34);
+    orderedServices.forEach((service) => {
+      const values = [
+        service.serviceNumber,
+        dateLabel(service.inDate),
+        service.customerName,
+        `${service.brand} ${service.mobileModel}`.trim(),
+        service.contactNumber,
+        service.status,
+        service.deliveryOutDate ? dateLabel(service.deliveryOutDate) : "—",
+        service.deliveryOutPerson || "—",
+        pdfMoney(service.serviceAmount),
+      ];
+      const lines = values.map((value, index) => pdf.splitTextToSize(value || "—", columns[index].width - 2) as string[]);
+      const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
+      if (y + rowHeight > pageHeight - 12) {
+        pdf.addPage();
+        y = drawTableHeader(14);
+      }
+      let x = margin;
+      lines.forEach((cellLines, index) => {
+        pdf.text(cellLines, x + 1, y, { maxWidth: columns[index].width - 2 });
+        x += columns[index].width;
+      });
+      y += rowHeight;
+      pdf.setDrawColor(225, 230, 238);
+      pdf.line(margin, y - 2, margin + columns.reduce((sum, column) => sum + column.width, 0), y - 2);
+    });
+    const pageCount = pdf.getNumberOfPages();
+    for (let page = 1; page <= pageCount; page += 1) {
+      pdf.setPage(page);
+      pdf.setFontSize(8);
+      pdf.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 5, { align: "right" });
+    }
+    pdf.save(`service-report-${dateInputValue()}.pdf`);
+  };
   return <>
-    <PageHeader eyebrow="REPAIR & CARE" title="Service desk" description="Track every repair from intake to handover."><Button variant="secondary" onClick={() => router.push("/services/ready")}><CheckCircle2 size={15} /> Ready for pickup</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> New service job</Button>}</PageHeader>
+    <PageHeader eyebrow="REPAIR & CARE" title="Service desk" description="Track every repair from intake to handover."><Button variant="secondary" onClick={exportServicesPdf}><Download size={15} /> Export PDF</Button><Button variant="secondary" onClick={() => router.push("/services/ready")}><CheckCircle2 size={15} /> Ready for pickup</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> New service job</Button>}</PageHeader>
     <div className="service-kpis">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <div className="service-kpi" key={status}><span className={`status-dot ${statusClass(status)}`} /><span>{status}</span><strong>{services.filter((item) => item.status === status).length}</strong></div>)}</div>
-    <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search bill, customer, model or IMEI…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label><label className="select-wrap"><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All payments</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option></select><ChevronDown size={14} /></label><input aria-label="Services from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /><input aria-label="Services to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
-      {filtered.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL</th><th>CUSTOMER</th><th>DEVICE</th><th>REPORTED FAULT</th><th>STATUS</th><th>AMOUNT / DUE</th><th /></tr></thead><tbody>{filtered.slice((page - 1) * pageSize, page * pageSize).map((job) => {
+    <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search bill, customer, model or IMEI…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label><label className="select-wrap"><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All payments</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option></select><ChevronDown size={14} /></label><div className="date-range compact-date-range"><label>From<input aria-label="Services from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /></label><label>To<input aria-label="Services to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /></label></div><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
+      {filtered.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{filtered.slice((page - 1) * pageSize, page * pageSize).map((job) => {
         const due = Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments));
-        return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button><small className="table-subtext">{dateLabel(job.inDate)}</small></td><td><span className="customer-cell"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></span></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td><span className="muted-cell ellipsis-cell">{job.reportedFault}</span></td><td><select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><strong>{money(job.serviceAmount - job.discount)}</strong><small className={due ? "due-text" : "table-subtext"}>{due ? `${money(due)} due` : "Settled"}</small></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
+        return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(job.inDate)}</span></td><td><strong>{job.customerName}</strong></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td>{job.contactNumber}</td><td><select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><span className="muted-cell">{job.deliveryOutDate ? dateLabel(job.deliveryOutDate) : "—"}</span></td><td>{job.deliveryOutPerson || "—"}</td><td><strong>{money(job.serviceAmount)}</strong></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
       })}</tbody></table></div> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
       {filtered.length > 0 && <Pagination page={page} pages={pages} total={filtered.length} pageSize={pageSize} onPage={setPage} />}
     </div>

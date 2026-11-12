@@ -28,6 +28,7 @@ export const productSchema = z.object({
 });
 
 export const saleSchema = z.object({
+  invoiceNumber: z.string().trim().min(1, "Enter an invoice number.").max(120, "Invoice number must be 120 characters or fewer."),
   customerName: z.string().trim().min(2, "Enter the customer's name."),
   contactNumber: phone,
   invoiceDate: z.string().min(1, "Choose an invoice date."),
