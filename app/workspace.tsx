@@ -2,8 +2,8 @@
 
 import {
   Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Bell,
-  Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, ClipboardList,
-  Clock3, CreditCard, Download, FileText, Filter, LayoutDashboard, LogOut, Menu, MoreHorizontal,
+  Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ClipboardList,
+  Clock3, CreditCard, Download, Eye, EyeOff, FileText, Filter, LayoutDashboard, LogOut, Menu, MoreHorizontal,
   Pencil, Plus, Printer, Search, Settings, ShieldCheck, Smartphone, Users, Wrench, X, Zap,
 } from "lucide-react";
 import Link from "next/link";
@@ -115,12 +115,23 @@ export default function Workspace() {
   });
   const pendingOwnerUid = useRef<string | null>(null);
 
+  useEffect(() => {
+    if (pathname === "/login" && user) router.replace("/dashboard");
+  }, [pathname, router, user]);
+
   const notify = useCallback((text: string, tone: ToastInfo["tone"] = "success") => {
     setToast({ text, tone });
     window.setTimeout(() => setToast(null), 3600);
   }, []);
   const notifyFromError = useCallback((reason: unknown) =>
     notify(reason instanceof Error ? reason.message : "Something went wrong. Please try again.", "error"), [notify]);
+  const handleLogout = useCallback(async () => {
+    try {
+      await logOut();
+    } catch (reason) {
+      notifyFromError(reason);
+    }
+  }, [notifyFromError]);
 
   useEffect(() => {
     if (!firebaseConfigured) return;
@@ -246,7 +257,7 @@ export default function Workspace() {
     return sale;
   }, [data, persist, saveCustomer, user]);
 
-  const saveService = useCallback(async (draft: Omit<ServiceJob, "id" | "serviceNumber">): Promise<ServiceJob> => {
+  const saveService = useCallback(async (draft: Omit<ServiceJob, "id" | "serviceNumber"> & { serviceNumber?: string }): Promise<ServiceJob> => {
     const customer = await saveCustomer(draft.customerName, draft.contactNumber);
     if (firebaseConfigured && user) {
       const created = await createNumberedRecord(user.shopId, "services", data.settings.servicePrefix || "SRV", {
@@ -258,7 +269,7 @@ export default function Workspace() {
       return service;
     }
     const id = newId();
-    const serviceNumber = nextInvoiceNumber("services", data.settings.servicePrefix || "SRV", data.services);
+    const serviceNumber = draft.serviceNumber?.trim() || nextInvoiceNumber("services", data.settings.servicePrefix || "SRV", data.services);
     const service: ServiceJob = { ...draft, id, serviceNumber, customerId: customer.id };
     const customers = data.customers.some((item) => item.id === customer.id) ? data.customers : [customer, ...data.customers];
     await persist({ ...data, customers, services: [service, ...data.services] });
@@ -306,6 +317,10 @@ export default function Workspace() {
 
   const setServiceStatus = useCallback((service: ServiceJob, status: ServiceStatus) => {
     const current = data.services.find((item) => item.id === service.id) ?? service;
+    if (current.status === "Returned") {
+      notify("This service job has already been returned and its status cannot be changed.");
+      return;
+    }
     if (status === "Returned") {
       if (current.status !== "Ready") {
         notify("Mark this service job as Ready before handing it back.");
@@ -323,8 +338,12 @@ export default function Workspace() {
               deliveryHistory: [...(current.deliveryHistory ?? []), {
                 date: delivery.deliveryOutDate ?? new Date().toISOString(),
                 person: delivery.deliveryOutPerson ?? "",
+                staff: user?.username ?? "Staff",
+                staffId: user?.uid ?? "",
                 remarks: delivery.deliveryRemarks ?? "",
               }],
+              deliveryOutStaff: user?.username ?? "Staff",
+              deliveryOutStaffId: user?.uid ?? "",
             });
             setModal(null);
             notify("Device marked as returned.");
@@ -336,13 +355,17 @@ export default function Workspace() {
     void updateService({ ...current, status, readyAt: status === "Ready" ? new Date().toISOString() : current.readyAt })
       .then(() => notify("Service status updated."))
       .catch(notifyFromError);
-  }, [data.services, notify, notifyFromError, updateService]);
+  }, [data.services, notify, notifyFromError, updateService, user?.uid, user?.username]);
 
   if (authLoading) return <AuthLoading />;
-  if (firebaseConfigured && !user) {
+  if (!firebaseConfigured || !user) {
     return <AuthScreen
-      error={authError}
+      error={firebaseConfigured
+        ? authError
+        : "Firebase Authentication is not configured. Add the NEXT_PUBLIC_FIREBASE_* values to .env.local and restart the app."}
+      disabled={!firebaseConfigured}
       onSubmit={async (username, password) => {
+        if (!firebaseConfigured) return;
         setAuthError("");
         const parsed = loginSchema.safeParse({ username, password });
         if (!parsed.success) {
@@ -371,25 +394,31 @@ export default function Workspace() {
   const title = routeTitle(route, subroute);
   const canViewModule = (module: EmployeeModule) => !firebaseConfigured || user?.role === "admin" || user?.permissions[module] !== "none";
   const canEditModule = (module: EmployeeModule) => !firebaseConfigured || user?.role === "admin" || user?.permissions[module] === "edit";
-  const hasAnyModule = !firebaseConfigured || user?.role === "admin"
-    || Object.values(user?.permissions ?? {}).some((access) => access !== "none");
-  const routeModule: EmployeeModule | null = route === "sales" ? "sales"
+  const isReadyServiceDetail = route === "services" && Boolean(routeId)
+    && data.services.some((service) => (service.id === routeId || service.serviceNumber === routeId) && service.status === "Ready")
+    && canViewModule("ready");
+  const routeModule: EmployeeModule | null = route === "dashboard" ? "overview"
+    : route === "sales" ? "sales"
+    : route === "services" && (subroute === "ready" || isReadyServiceDetail) ? "ready"
     : route === "services" ? "services"
     : route === "customers" ? "customers"
     : route === "reports" ? "reports"
     : route === "settings" ? "settings"
     : null;
   const requiresEdit = (route === "sales" || route === "services") && subroute === "create";
+  const canAccessReady = canViewModule("ready") || canViewModule("services") || canViewModule("reports");
   const accessDenied = user?.role === "employee" && (
-    (routeModule !== null && !canViewModule(routeModule))
-    || (route === "dashboard" && !hasAnyModule)
+    (routeModule === "ready" ? !canAccessReady : routeModule !== null && !canViewModule(routeModule))
+    || (route === "dashboard" && !canViewModule("overview"))
     || (requiresEdit && routeModule !== null && !canEditModule(routeModule))
   );
   const visibleNav = NAV.filter(({ href }) => href === "/dashboard"
-    ? hasAnyModule
-    : canViewModule(href === "/sales" ? "sales"
-      : href === "/services" || href === "/services/ready" ? "services"
-      : href === "/customers" ? "customers" : "reports"));
+    ? canViewModule("overview")
+    : href === "/sales" ? canViewModule("sales") || canViewModule("reports")
+    : href === "/services" ? canViewModule("services") || canViewModule("reports")
+    : href === "/services/ready" ? canAccessReady
+    : href === "/customers" ? canViewModule("customers")
+    : canViewModule("reports"));
 
   if (!ready || loading) return <AuthLoading />;
 
@@ -490,6 +519,7 @@ export default function Workspace() {
     : route === "services" && subroute === "create"
     ? <ServiceForm
         customers={data.customers}
+        services={data.services}
         settings={data.settings}
         busy={busy}
         onSubmit={async (draft) => {
@@ -507,16 +537,21 @@ export default function Workspace() {
     : route === "services" && subroute === "ready"
     ? <ReadyPage services={data.services} onView={(id) => router.push(`/services/${id}`)}
         onPayment={(id) => openPayment("service", id)}
-        onReturn={(service) => setServiceStatus(service, "Returned")} canEdit={canEditModule("services")}
+        onReturn={(service) => setServiceStatus(service, "Returned")}
+        canEditPayment={canEditModule("services")}
+        canReturn={canEditModule("services") || canEditModule("ready")}
+        canViewAllServices={canViewModule("services") || canViewModule("reports")}
       />
     : route === "services" && routeId
     ? <ServiceDetail service={data.services.find((item) => item.id === routeId || item.serviceNumber === routeId)}
-        onBack={() => router.push("/services")} onPayment={(id) => openPayment("service", id)} settings={data.settings}
+        onBack={() => router.push(canViewModule("services") || canViewModule("reports") ? "/services" : "/services/ready")}
+        onPayment={(id) => openPayment("service", id)} settings={data.settings}
         onUpdate={(service) => setServiceStatus(service, service.status)} canEdit={canEditModule("services")} />
     : route === "services"
     ? <ServicesPage services={data.services} search={globalSearch} onSearch={setGlobalSearch}
         onCreate={() => router.push("/services/create")} onView={(id) => router.push(`/services/${id}`)}
-        onPayment={(id) => openPayment("service", id)} onUpdate={(service) => setServiceStatus(service, service.status)} canEdit={canEditModule("services")} />
+        onPayment={(id) => openPayment("service", id)} onUpdate={(service) => setServiceStatus(service, service.status)}
+        canEdit={canEditModule("services")} />
     : route === "customers"
     ? <CustomersPage customers={data.customers} sales={data.sales} services={data.services}
         search={globalSearch} onSearch={setGlobalSearch} onAdd={addCustomerDialog}
@@ -537,9 +572,13 @@ export default function Workspace() {
         onCreateService={() => router.push("/services/create")}
         canCreateSale={canEditModule("sales")}
         canCreateService={canEditModule("services")}
-        canViewSales={canViewModule("sales") || canViewModule("reports")}
-        canViewServices={canViewModule("services") || canViewModule("reports")}
-        canViewCustomers={canViewModule("customers")}
+        canViewSales={canViewModule("sales") || canViewModule("reports") || canViewModule("overview")}
+        canViewServices={canViewModule("services") || canViewModule("reports") || canViewModule("overview")}
+        canViewCustomers={canViewModule("customers") || canViewModule("overview")}
+        canOpenSales={canViewModule("sales") || canViewModule("reports")}
+        canOpenServices={canViewModule("services") || canViewModule("reports")}
+        canOpenReady={canAccessReady}
+        canOpenCustomers={canViewModule("customers")}
         onSeeSales={() => router.push("/sales")}
         onSeeServices={() => router.push("/services")}
         onSeeReady={() => router.push("/services/ready")}
@@ -552,11 +591,10 @@ export default function Workspace() {
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
         <div className="brand-row">
           <div className="brand-mark"><Smartphone size={19} strokeWidth={2.6} /></div>
-          <span className="brand-name">{data.settings.shopName || "A&H Mobiles"}<span>SHOP MANAGER</span></span>
+          <span className="brand-name">{data.settings.shopName || "A&H Mobiles"}</span>
           <button className="icon-btn sidebar-close" aria-label="Close menu" onClick={() => setMenuOpen(false)}><X size={18} /></button>
         </div>
-        <div className="shop-chip"><span className="shop-avatar">{(data.settings.shopName || "A")[0].toUpperCase()}</span><span>{data.settings.shopName || "My shop"}</span><ChevronDown size={14} /></div>
-        <div className="nav-caption">WORKSPACE</div>
+        <div className="sidebar-divider" role="separator" />
         <nav className="nav-list" aria-label="Main navigation">
           {visibleNav.map(({ label, href, icon: Icon }) => (
             <Link key={href} href={href} className={`nav-link ${activeHref === href ? "active" : ""}`}
@@ -568,7 +606,6 @@ export default function Workspace() {
           ))}
         </nav>
         <div className="sidebar-spacer" />
-        <div className="help-card"><div className="help-icon"><CircleHelp size={17} /></div><strong>Need a hand?</strong><span>Quick tips for your shop workspace.</span><button onClick={() => notify("Tip: start by adding your shop details in Settings.")}>Explore help <ArrowRight size={13} /></button></div>
         <Link href="/settings" className={`nav-link settings-link ${activeHref === "/settings" ? "active" : ""}`}
           onClick={() => setMenuOpen(false)}>
           <Settings size={18} strokeWidth={1.8} /><span>Settings</span>
@@ -576,7 +613,7 @@ export default function Workspace() {
         <div className="user-profile">
           <span className="profile-avatar">{user?.username[0]?.toUpperCase() ?? "A"}</span>
           <span className="profile-text"><strong>{user?.username ?? data.settings.ownerName ?? "Shop owner"}</strong><span>{user?.role === "employee" ? "Employee access" : user?.email ?? (firebaseConfigured ? "Connected" : "Local workspace")}</span></span>
-          {firebaseConfigured && <button className="icon-btn" aria-label="Sign out" onClick={() => void logOut()}><LogOut size={16} /></button>}
+          <button type="button" className="profile-logout" onClick={() => void handleLogout()}><LogOut size={15} /><span>Log out</span></button>
         </div>
       </aside>
 
@@ -590,7 +627,6 @@ export default function Workspace() {
             <span className="topbar-avatar">{user?.email?.[0]?.toUpperCase() ?? "A"}</span>
           </div>
         </header>
-        {!firebaseConfigured && <div className="local-banner"><ShieldCheck size={15} /><span><strong>Local preview</strong> — changes are saved in this browser only. Configure Firebase before using real customer or payment data.</span><Link href="/settings">Setup guide <ArrowRight size={13} /></Link></div>}
         {error && <div className="error-banner" role="alert"><Activity size={15} /><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss error"><X size={15} /></button></div>}
         <main className={`page-content ${route === "customers" && !canEditModule("customers") ? "customer-read-only" : ""}`}>
           {accessDenied ? <AccessDenied /> : view}
@@ -620,10 +656,12 @@ function AuthLoading() {
   return <div className="loading-screen"><div className="loading-brand"><div className="brand-mark"><Smartphone size={19} /></div><strong>A&H Mobiles</strong></div><div className="loading-spinner" /><span>Getting your workspace ready…</span></div>;
 }
 
-function AuthScreen({ error, onSubmit }: {
+function AuthScreen({ error, disabled = false, onSubmit }: {
   error: string;
+  disabled?: boolean;
   onSubmit: (username: string, password: string) => Promise<void>;
 }) {
+  const [showPassword, setShowPassword] = useState(false);
   const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<{ username: string; password: string }>({
     resolver: zodResolver(loginSchema), defaultValues: { username: "", password: "" },
   });
@@ -632,10 +670,17 @@ function AuthScreen({ error, onSubmit }: {
       <div className="auth-aside"><div className="auth-brand"><div className="brand-mark"><Smartphone size={19} /></div><strong>A&H Mobiles</strong></div><div className="auth-pitch"><span className="eyebrow">YOUR SHOP, IN SYNC</span><h1>Everything your shop needs.<br /><span>All in one place.</span></h1><p>Keep sales moving, repairs on track, and every customer feeling looked after.</p><div className="auth-points"><span><Check size={15} /> Sales & service billing</span><span><Check size={15} /> Customer & payment history</span><span><Check size={15} /> Reports that make sense</span></div></div><div className="auth-aside-foot">Simple tools. Better business.</div></div>
       <div className="auth-main"><form className="auth-form" onSubmit={handleSubmit(({ username, password }) => onSubmit(username, password))}>
         <span className="eyebrow">ADMIN & EMPLOYEE ACCESS</span><h2>Welcome back</h2><p>Sign in with your username or admin email.</p>
-        <label className="field-label">Username or admin email<input className="input" type="text" autoComplete="username" placeholder="Username or email" {...register("username")} /></label>{errors.username && <span className="field-error">{errors.username.message}</span>}
-        <label className="field-label">Password<input className="input" type="password" placeholder="At least 8 characters" {...register("password")} /></label>{errors.password && <span className="field-error">{errors.password.message}</span>}
+        <label className="field-label">Username or admin email<input className="input" type="text" autoComplete="username" placeholder="Username or email" disabled={disabled} {...register("username")} /></label>{errors.username && <span className="field-error">{errors.username.message}</span>}
+        <label className="field-label" htmlFor="login-password">Password</label>
+        <div className="password-input-wrap">
+          <input id="login-password" className="input" type={showPassword ? "text" : "password"} autoComplete="current-password" placeholder="Password" disabled={disabled} {...register("password")} />
+          <button type="button" className="password-toggle" aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword} disabled={disabled} onClick={() => setShowPassword((shown) => !shown)}>
+            {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+          </button>
+        </div>
+        {errors.password && <span className="field-error">{errors.password.message}</span>}
         {error && <div className="form-alert">{error}</div>}
-        <button className="btn btn-primary btn-full" disabled={isSubmitting}>{isSubmitting ? "Please wait…" : "Sign in"} <ArrowRight size={16} /></button>
+        <button className="btn btn-primary btn-full" disabled={disabled || isSubmitting}>{isSubmitting ? "Please wait…" : "Sign in"} <ArrowRight size={16} /></button>
         <p className="auth-secure"><ShieldCheck size={14} /> Your workspace is private and protected by Firebase Authentication.</p>
       </form></div>
     </div>
@@ -661,11 +706,12 @@ function AccessDenied() {
   return <div className="panel"><EmptyState icon={ShieldCheck} title="Access not granted" detail="Ask your shop administrator to enable this module or permission." /></div>;
 }
 
-function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, setChartTo, onCreateSale, onCreateService, canCreateSale, canCreateService, canViewSales, canViewServices, canViewCustomers, onSeeSales, onSeeServices, onSeeReady, onCustomer }: {
+function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, setChartTo, onCreateSale, onCreateService, canCreateSale, canCreateService, canViewSales, canViewServices, canViewCustomers, canOpenSales, canOpenServices, canOpenReady, canOpenCustomers, onSeeSales, onSeeServices, onSeeReady, onCustomer }: {
   data: WorkspaceData; period: ChartPeriod; setPeriod: (period: ChartPeriod) => void;
   chartFrom: string; setChartFrom: (value: string) => void; chartTo: string; setChartTo: (value: string) => void;
   onCreateSale: () => void; onCreateService: () => void; canCreateSale: boolean; canCreateService: boolean;
   canViewSales: boolean; canViewServices: boolean; canViewCustomers: boolean;
+  canOpenSales: boolean; canOpenServices: boolean; canOpenReady: boolean; canOpenCustomers: boolean;
   onSeeSales: () => void; onSeeServices: () => void;
   onSeeReady: () => void; onCustomer: () => void;
 }) {
@@ -722,27 +768,27 @@ function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, 
           <div className="chart-legend">{canViewSales && <span><i className="legend-dot blue-dot" />Sales</span>}{canViewServices && <span><i className="legend-dot green-dot" />Services</span>}</div>
         </section>}
         {canViewServices && <section className="panel service-overview">
-          <div className="panel-heading"><div><h2>Service desk</h2><p>Repair jobs at a glance</p></div><button className="text-link" onClick={onSeeServices}>View all <ArrowRight size={14} /></button></div>
+          <div className="panel-heading"><div><h2>Service desk</h2><p>Repair jobs at a glance</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>View all <ArrowRight size={14} /></button>}</div>
           <div className="service-summary">
             {(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <div className="service-count" key={status}><span className={`status-dot ${statusClass(status)}`} /> <span>{status}</span><strong>{data.services.filter((job) => job.status === status).length}</strong></div>)}
           </div>
           <div className="panel-divider" />
-          <div className="ready-highlight"><div className="ready-icon"><Zap size={18} /></div><div><strong>{readyJobs.length} ready for pickup</strong><span>Let customers know their device is ready.</span></div><button className="circle-arrow" onClick={onSeeReady} aria-label="Open ready for delivery"><ArrowRight size={16} /></button></div>
+          <div className="ready-highlight"><div className="ready-icon"><Zap size={18} /></div><div><strong>{readyJobs.length} ready for pickup</strong><span>Let customers know their device is ready.</span></div>{canOpenReady && <button className="circle-arrow" onClick={onSeeReady} aria-label="Open ready for delivery"><ArrowRight size={16} /></button>}</div>
         </section>}
         {canViewSales && <section className="panel recent-panel">
-          <div className="panel-heading"><div><h2>Recent sales</h2><p>Your latest invoices</p></div><button className="text-link" onClick={onSeeSales}>See all <ArrowRight size={14} /></button></div>
-          <SalesTable sales={data.sales.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5)} compact />
+          <div className="panel-heading"><div><h2>Recent sales</h2><p>Your latest invoices</p></div>{canOpenSales && <button className="text-link" onClick={onSeeSales}>See all <ArrowRight size={14} /></button>}</div>
+          <SalesTable sales={data.sales.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5)} compact canOpen={canOpenSales} />
           {data.sales.length === 0 && <EmptyState icon={CreditCard} title="No sales just yet" detail="Your new invoices will show up here." action={canCreateSale ? <Button variant="secondary" onClick={onCreateSale}><Plus size={15} /> Create a sale</Button> : undefined} />}
         </section>}
         {canViewServices && <section className="panel ready-panel">
-          <div className="panel-heading"><div><h2>Waiting for pickup</h2><p>Devices ready to go home</p></div><button className="text-link" onClick={onSeeReady}>Open list <ArrowRight size={14} /></button></div>
+          <div className="panel-heading"><div><h2>Waiting for pickup</h2><p>Devices ready to go home</p></div>{canOpenReady && <button className="text-link" onClick={onSeeReady}>Open list <ArrowRight size={14} /></button>}</div>
           {readyJobs.length === 0 ? <EmptyState icon={CheckCircle2} title="All caught up" detail="Jobs marked ready will appear here." /> :
             <div className="pickup-list">{readyJobs.slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Smartphone size={17} /></span><span className="pickup-info"><strong>{job.customerName}</strong><span>{job.brand} {job.mobileModel} · {job.serviceNumber}</span></span><span className="pickup-balance">{money(Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments)))}</span></div>)}</div>}
         </section>}
-        {canViewServices && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div><button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button></div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{job.brand} {job.mobileModel} · {dateLabel(job.inDate)}</span></span><StatusBadge status={job.status} /></div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={canCreateService ? <Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button> : undefined} />}</section>}
-        {canViewCustomers && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recently added customers</h2><p>Your newest customer records</p></div><button className="text-link" onClick={onCustomer}>View directory <ArrowRight size={14} /></button></div>{data.customers.length ? <div className="pickup-list">{data.customers.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((customer) => <div className="pickup-item" key={customer.id}><span className="mini-avatar">{customer.name[0]?.toUpperCase() ?? "?"}</span><span className="pickup-info"><strong>{customer.name}</strong><span>{customer.phone} · Added {dateLabel(customer.createdAt)}</span></span><Users size={15} className="customer-row-icon" /></div>)}</div> : <EmptyState icon={Users} title="Your directory is ready" detail="Customers added to a bill will show up here." action={<Button variant="secondary" onClick={onCustomer}><Users size={14} /> View customers</Button>} />}</section>}
+        {canViewServices && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button>}</div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{job.brand} {job.mobileModel} · {dateLabel(job.inDate)}</span></span><StatusBadge status={job.status} /></div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={canCreateService ? <Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button> : undefined} />}</section>}
+        {canViewCustomers && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recently added customers</h2><p>Your newest customer records</p></div>{canOpenCustomers && <button className="text-link" onClick={onCustomer}>View directory <ArrowRight size={14} /></button>}</div>{data.customers.length ? <div className="pickup-list">{data.customers.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((customer) => <div className="pickup-item" key={customer.id}><span className="mini-avatar">{customer.name[0]?.toUpperCase() ?? "?"}</span><span className="pickup-info"><strong>{customer.name}</strong><span>{customer.phone} · Added {dateLabel(customer.createdAt)}</span></span><Users size={15} className="customer-row-icon" /></div>)}</div> : <EmptyState icon={Users} title="Your directory is ready" detail="Customers added to a bill will show up here." action={canOpenCustomers ? <Button variant="secondary" onClick={onCustomer}><Users size={14} /> View customers</Button> : undefined} />}</section>}
       </div>
-      <div className="dashboard-bottom-note"><span><ShieldCheck size={15} /> Your business data stays private to your workspace.</span>{canViewCustomers && <button className="text-link" onClick={onCustomer}>Manage customers <ArrowRight size={13} /></button>}</div>
+      <div className="dashboard-bottom-note"><span><ShieldCheck size={15} /> Your business data stays private to your workspace.</span>{canOpenCustomers && <button className="text-link" onClick={onCustomer}>Manage customers <ArrowRight size={13} /></button>}</div>
     </>
   );
 }
@@ -855,8 +901,8 @@ function SalesPage({ sales, search, onSearch, onCreate, onView, onPayment, setti
   </>;
 }
 
-function SalesTable({ sales, compact = false, onView, onPayment, settings }: {
-  sales: Sale[]; compact?: boolean; onView?: (id: string) => void; onPayment?: (id: string) => void; settings?: ShopSettings;
+function SalesTable({ sales, compact = false, canOpen = true, onView, onPayment, settings }: {
+  sales: Sale[]; compact?: boolean; canOpen?: boolean; onView?: (id: string) => void; onPayment?: (id: string) => void; settings?: ShopSettings;
 }) {
   const router = useRouter();
   const viewSale = (id: string) => onView ? onView(id) : router.push(`/sales/${id}`);
@@ -864,7 +910,7 @@ function SalesTable({ sales, compact = false, onView, onPayment, settings }: {
     {sales.map((sale) => {
       const paid = paymentTotal(sale.payments);
       const due = Math.max(0, sale.finalAmount - paid);
-      return <tr key={sale.id}><td><button className="table-primary-link" onClick={() => viewSale(sale.id)}>{sale.invoiceNumber}</button></td><td><span className="customer-cell"><span className="mini-avatar">{sale.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{sale.customerName}</strong><small>{sale.contactNumber}</small></span></span></td>{!compact && <td><span className="muted-cell">{sale.products.length} item{sale.products.length === 1 ? "" : "s"}</span></td>}<td><span className="muted-cell">{dateLabel(sale.invoiceDate)}</span></td><td><strong className="amount-cell">{money(sale.finalAmount)}</strong></td>{!compact && <td><span className="muted-cell">{money(paid)}{due > 0 && <small className="due-text">{money(due)} due</small>}</span></td>}<td><StatusBadge status={statusOf(sale.finalAmount, paid)} /></td><td><button className="row-action" aria-label="View invoice" onClick={() => viewSale(sale.id)}><ArrowRight size={15} /></button>{onPayment && due > 0 && <button className="row-action" aria-label="Record payment" onClick={() => onPayment(sale.id)}><Plus size={15} /></button>}{settings && <button className="row-action" aria-label="Download invoice" onClick={() => downloadInvoice(sale, settings)}><Download size={15} /></button>}</td></tr>;
+      return <tr key={sale.id}><td>{canOpen ? <button className="table-primary-link" onClick={() => viewSale(sale.id)}>{sale.invoiceNumber}</button> : <span>{sale.invoiceNumber}</span>}</td><td><span className="customer-cell"><span className="mini-avatar">{sale.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{sale.customerName}</strong><small>{sale.contactNumber}</small></span></span></td>{!compact && <td><span className="muted-cell">{sale.products.length} item{sale.products.length === 1 ? "" : "s"}</span></td>}<td><span className="muted-cell">{dateLabel(sale.invoiceDate)}</span></td><td><strong className="amount-cell">{money(sale.finalAmount)}</strong></td>{!compact && <td><span className="muted-cell">{money(paid)}{due > 0 && <small className="due-text">{money(due)} due</small>}</span></td>}<td><StatusBadge status={statusOf(sale.finalAmount, paid)} /></td><td>{canOpen && <button className="row-action" aria-label="View invoice" onClick={() => viewSale(sale.id)}><ArrowRight size={15} /></button>}{onPayment && due > 0 && <button className="row-action" aria-label="Record payment" onClick={() => onPayment(sale.id)}><Plus size={15} /></button>}{settings && <button className="row-action" aria-label="Download invoice" onClick={() => downloadInvoice(sale, settings)}><Download size={15} /></button>}</td></tr>;
     })}
   </tbody></table></div>;
 }
@@ -956,12 +1002,32 @@ function FormField({ label, children, error }: { label: string; children: ReactN
   return <label className="field-label">{label}{children}{error && <span className="field-error">{error}</span>}</label>;
 }
 
-function ServiceForm({ customers, settings, busy, onSubmit, onCancel }: {
-  customers: Customer[];
-  settings: ShopSettings;
-  busy: boolean; onSubmit: (draft: Omit<ServiceJob, "id" | "serviceNumber">) => Promise<ServiceJob | undefined>; onCancel: () => void;
+function PasswordInput({ value, onChange, autoComplete, placeholder }: {
+  value: string;
+  onChange: (value: string) => void;
+  autoComplete: string;
+  placeholder?: string;
 }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="password-input-wrap">
+      <input className="input" type={visible ? "text" : "password"} autoComplete={autoComplete} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+      <button type="button" className="password-toggle" aria-label={visible ? "Hide password" : "Show password"} aria-pressed={visible} onClick={() => setVisible((shown) => !shown)}>
+        {visible ? <EyeOff size={17} /> : <Eye size={17} />}
+      </button>
+    </div>
+  );
+}
+
+function ServiceForm({ customers, services, settings, busy, onSubmit, onCancel }: {
+  customers: Customer[];
+  services: ServiceJob[];
+  settings: ShopSettings;
+  busy: boolean; onSubmit: (draft: Omit<ServiceJob, "id" | "serviceNumber"> & { serviceNumber?: string }) => Promise<ServiceJob | undefined>; onCancel: () => void;
+}) {
+  const generatedServiceNumber = nextInvoiceNumber("services", settings.servicePrefix || "SRV", services);
   const [conditions, setConditions] = useState<string[]>([]);
+  const [serviceNumber, setServiceNumber] = useState(generatedServiceNumber);
   const [amount, setAmount] = useState(0);
   const [discount, setDiscount] = useState(0);
   const [formError, setFormError] = useState("");
@@ -977,6 +1043,12 @@ function ServiceForm({ customers, settings, busy, onSubmit, onCancel }: {
     imei: string; reportedFault: string; technicianNotes: string; remarks: string;
   }, printAfterSave = false) => {
     setFormError("");
+    const trimmedServiceNumber = serviceNumber.trim();
+    if (!trimmedServiceNumber) { setFormError("Enter a service bill number."); return; }
+    if (services.some((service) => service.serviceNumber === trimmedServiceNumber)) {
+      setFormError("That service bill number is already in use.");
+      return;
+    }
     const parsed = serviceSchema.safeParse({ ...form, receivedConditions: conditions, serviceAmount: amount, discount });
     if (!parsed.success) { setFormError(parsed.error.issues[0]?.message ?? "Check the form details."); return; }
     const customer = customers.find((item) => item.phone.replace(/\D/g, "") === form.contactNumber.replace(/\D/g, ""));
@@ -986,6 +1058,7 @@ function ServiceForm({ customers, settings, busy, onSubmit, onCancel }: {
       imei: form.imei.trim(), reportedFault: form.reportedFault.trim(), technicianNotes: form.technicianNotes.trim(),
       receivedConditions: conditions, remarks: form.remarks.trim(), status: "Received", serviceAmount: amount,
       discount, finalAmount: final, payments: [], createdAt: new Date().toISOString(),
+      serviceNumber: trimmedServiceNumber === generatedServiceNumber ? undefined : trimmedServiceNumber,
     });
     if (saved && printAfterSave) printReceipt(saved, settings);
   };
@@ -994,8 +1067,8 @@ function ServiceForm({ customers, settings, busy, onSubmit, onCancel }: {
   return <>
     <PageHeader eyebrow="SERVICE DESK · NEW JOB" title="New service job" description="Record the device condition and repair request at intake."><Button variant="secondary" onClick={onCancel}><ArrowLeft size={15} /> Back to services</Button></PageHeader>
     <form className="billing-layout" onSubmit={submit} noValidate><div className="billing-main">
-      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">01</span><div><h2>Customer & intake</h2><p>Contact details and when the device arrived.</p></div></div><div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} /></FormField><FormField label="In date"><input className="input" type="date" {...register("inDate")} /></FormField><FormField label="Service bill number"><div className="input read-only">Auto-generated<span>Secure sequence</span></div></FormField></div></section>
-      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Device details</h2><p>Identify the device and document its condition.</p></div></div><div className="form-grid two-col"><FormField label="Brand"><input className="input" placeholder="Samsung" {...register("brand")} /></FormField><FormField label="Model"><input className="input" placeholder="Galaxy S24" {...register("mobileModel")} /></FormField><FormField label="IMEI (optional)"><input className="input" placeholder="15-digit IMEI" {...register("imei")} /></FormField><FormField label="Reported fault"><input className="input" placeholder="Describe the issue" {...register("reportedFault")} /></FormField></div><div className="condition-label">Received condition <span>Select all that apply</span></div><div className="condition-list">{CONDITIONS.map((condition) => <label key={condition} className={`condition-chip ${conditions.includes(condition) ? "checked" : ""}`}><input type="checkbox" checked={conditions.includes(condition)} onChange={() => toggleCondition(condition)} /><span>{conditions.includes(condition) && <Check size={12} />}</span>{condition}</label>)}</div><div className="form-grid two-col textareas"><FormField label="Technician notes"><textarea className="input textarea" placeholder="Notes for the repair team" {...register("technicianNotes")} /></FormField><FormField label="Additional remarks"><textarea className="input textarea" placeholder="Any other details about intake" {...register("remarks")} /></FormField></div><div className="credential-notice"><ShieldCheck size={16} /><span><strong>Device passwords and patterns are not collected.</strong> Please never record unlock credentials here or on the printed receipt.</span></div></section>
+      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">01</span><div><h2>Customer & intake</h2><p>Contact details and when the device arrived.</p></div></div><div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} /></FormField><FormField label="In date"><input className="input" type="date" {...register("inDate")} /></FormField><FormField label="Service bill number"><input className="input" required maxLength={120} value={serviceNumber} onChange={(event) => setServiceNumber(event.target.value)} /><span className="field-hint">Auto-generated; edit if needed.</span></FormField></div></section>
+      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Device details</h2><p>Identify the device and document its condition.</p></div></div><div className="form-grid two-col"><FormField label="Brand"><input className="input" placeholder="Samsung" {...register("brand")} /></FormField><FormField label="Model"><input className="input" placeholder="Galaxy S24" {...register("mobileModel")} /></FormField><FormField label="IMEI (optional)"><input className="input" placeholder="15-digit IMEI" {...register("imei")} /></FormField><FormField label="Reported fault" error={errors.reportedFault?.message}><input className="input" required placeholder="Describe the issue" {...register("reportedFault")} /></FormField></div><div className="condition-label">Received condition <span>Select all that apply</span></div><div className="condition-list">{CONDITIONS.map((condition) => <label key={condition} className={`condition-chip ${conditions.includes(condition) ? "checked" : ""}`}><input type="checkbox" checked={conditions.includes(condition)} onChange={() => toggleCondition(condition)} /><span>{conditions.includes(condition) && <Check size={12} />}</span>{condition}</label>)}</div><div className="form-grid two-col textareas"><FormField label="Technician notes"><textarea className="input textarea" placeholder="Notes for the repair team" {...register("technicianNotes")} /></FormField><FormField label="Additional remarks"><textarea className="input textarea" placeholder="Any other details about intake" {...register("remarks")} /></FormField></div><div className="credential-notice"><ShieldCheck size={16} /><span><strong>Device passwords and patterns are not collected.</strong> Please never record unlock credentials here or on the printed receipt.</span></div></section>
       <section className="panel form-panel"><div className="form-section-head"><span className="step-number">03</span><div><h2>Service charge</h2><p>Enter the service charge and any discount.</p></div></div><div className="form-grid two-col"><FormField label="Service charge (₹)"><input className="input" type="number" min="0" value={amount || ""} placeholder="0" onChange={(event) => setAmount(Number(event.target.value))} /></FormField><FormField label="Discount (₹)"><input className="input" type="number" min="0" value={discount || ""} placeholder="0" onChange={(event) => setDiscount(Number(event.target.value))} /></FormField></div></section>
       {formError && <div className="form-alert">{formError}</div>}<div className="form-footer"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="secondary" onClick={() => void submitAndPrint()} disabled={busy}><Printer size={15} /> Save & print</Button><Button type="submit" disabled={busy}>{busy ? "Saving…" : <><Check size={16} /> Save service job</>}</Button></div>
     </div><aside className="billing-side"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service estimate</strong><small>Update as work progresses</small></span></div><div className="total-lines"><span>Service charge <strong>{money(amount)}</strong></span><span>Discount <strong>− {money(discount)}</strong></span><div className="total-final"><span>Amount due</span><strong>{money(final)}</strong></div></div><div className="balance-box"><span>Balance</span><strong>{money(final)}</strong></div></div><div className="billing-tip"><Clock3 size={16} /><span>Service status starts as Received. Move it to Ready when repairs are complete.</span></div></aside></form>
@@ -1018,10 +1091,14 @@ function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment,
     && (paymentFilter === "All payments" || statusOf(service.finalAmount, paymentTotal(service.payments)) === paymentFilter)
     && (!from || service.inDate.slice(0, 10) >= from)
     && (!to || service.inDate.slice(0, 10) <= to))
-    .sort((a, b) => sortBy === "amount-desc" ? b.finalAmount - a.finalAmount
-      : sortBy === "amount-asc" ? a.finalAmount - b.finalAmount
-      : sortBy === "date-asc" ? a.inDate.localeCompare(b.inDate)
-      : b.inDate.localeCompare(a.inDate));
+    .sort((a, b) => {
+      const aCreated = a.createdAt || a.inDate;
+      const bCreated = b.createdAt || b.inDate;
+      if (sortBy === "amount-desc") return b.finalAmount - a.finalAmount;
+      if (sortBy === "amount-asc") return a.finalAmount - b.finalAmount;
+      const order = sortBy === "date-asc" ? 1 : -1;
+      return order * (aCreated.localeCompare(bCreated) || a.serviceNumber.localeCompare(b.serviceNumber));
+    });
   const pageSize = 8;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   return <>
@@ -1030,25 +1107,26 @@ function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment,
     <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search bill, customer, model or IMEI…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label><label className="select-wrap"><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All payments</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option></select><ChevronDown size={14} /></label><input aria-label="Services from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /><input aria-label="Services to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
       {filtered.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL</th><th>CUSTOMER</th><th>DEVICE</th><th>REPORTED FAULT</th><th>STATUS</th><th>AMOUNT / DUE</th><th /></tr></thead><tbody>{filtered.slice((page - 1) * pageSize, page * pageSize).map((job) => {
         const due = Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments));
-        return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button><small className="table-subtext">{dateLabel(job.inDate)}</small></td><td><span className="customer-cell"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></span></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td><span className="muted-cell ellipsis-cell">{job.reportedFault}</span></td><td><select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><strong>{money(job.serviceAmount - job.discount)}</strong><small className={due ? "due-text" : "table-subtext"}>{due ? `${money(due)} due` : "Settled"}</small></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
+        return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button><small className="table-subtext">{dateLabel(job.inDate)}</small></td><td><span className="customer-cell"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></span></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td><span className="muted-cell ellipsis-cell">{job.reportedFault}</span></td><td><select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><strong>{money(job.serviceAmount - job.discount)}</strong><small className={due ? "due-text" : "table-subtext"}>{due ? `${money(due)} due` : "Settled"}</small></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
       })}</tbody></table></div> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
       {filtered.length > 0 && <Pagination page={page} pages={pages} total={filtered.length} pageSize={pageSize} onPage={setPage} />}
     </div>
   </>;
 }
 
-function ReadyPage({ services, onView, onPayment, onReturn, canEdit }: {
-  services: ServiceJob[]; onView: (id: string) => void; onPayment: (id: string) => void; onReturn: (service: ServiceJob) => void; canEdit: boolean;
+function ReadyPage({ services, onView, onPayment, onReturn, canEditPayment, canReturn, canViewAllServices }: {
+  services: ServiceJob[]; onView: (id: string) => void; onPayment: (id: string) => void;
+  onReturn: (service: ServiceJob) => void; canEditPayment: boolean; canReturn: boolean; canViewAllServices: boolean;
 }) {
   const router = useRouter();
   const readyJobs = services.filter((service) => service.status === "Ready").sort((a, b) => (b.readyAt ?? "").localeCompare(a.readyAt ?? ""));
   return <>
-    <PageHeader eyebrow="SERVICE DESK · HANDOVER" title="Ready for delivery" description="The finishing touch: get these repaired devices back to their owners."><Button variant="secondary" onClick={() => router.push("/services")}><Wrench size={15} /> All service jobs</Button></PageHeader>
+    <PageHeader eyebrow="SERVICE DESK · HANDOVER" title="Ready for delivery" description="The finishing touch: get these repaired devices back to their owners.">{canViewAllServices && <Button variant="secondary" onClick={() => router.push("/services")}><Wrench size={15} /> All service jobs</Button>}</PageHeader>
     <div className="delivery-summary"><span className="delivery-summary-icon"><CheckCircle2 size={18} /></span><div><strong>{readyJobs.length} {readyJobs.length === 1 ? "device is" : "devices are"} ready</strong><span>Collect any remaining balance before handover.</span></div><strong className="delivery-total">{money(readyJobs.reduce((sum, item) => sum + Math.max(0, item.serviceAmount - item.discount - paymentTotal(item.payments)), 0))}<small>total balance</small></strong></div>
     {readyJobs.length ? <div className="ready-grid">{readyJobs.map((job) => {
       const due = Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments));
-      return <article className="ready-card" key={job.id}><div className="ready-card-top"><span className="ready-device-icon"><Smartphone size={20} /></span><StatusBadge status="Ready" /><button className="more-btn" aria-label="More actions" onClick={() => onView(job.id)}><MoreHorizontal size={18} /></button></div><div className="ready-card-id">{job.serviceNumber}</div><h2>{job.brand} {job.mobileModel}</h2><p>{job.reportedFault}</p><div className="ready-customer"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></div><div className="ready-card-meta"><span>Ready since <strong>{dateLabel(job.readyAt ?? job.inDate)}</strong></span><span>Balance <strong className={due ? "balance-due" : "balance-paid"}>{money(due)}</strong></span></div>{canEdit && <div className="ready-card-actions">{due > 0 && <Button variant="secondary" onClick={() => onPayment(job.id)}><CreditCard size={14} /> Collect payment</Button>}<Button onClick={() => onReturn(job)}><Check size={15} /> Mark returned</Button></div>}</article>;
-    })}</div> : <div className="panel"><EmptyState icon={CheckCircle2} title="Nothing waiting for pickup" detail="When a service job is marked Ready, you’ll find it here." action={<Button variant="secondary" onClick={() => router.push("/services")}><Wrench size={15} /> View service jobs</Button>} /></div>}
+      return <article className="ready-card" key={job.id}><div className="ready-card-top"><span className="ready-device-icon"><Smartphone size={20} /></span><StatusBadge status="Ready" /><button className="more-btn" aria-label="More actions" onClick={() => onView(job.id)}><MoreHorizontal size={18} /></button></div><div className="ready-card-id">{job.serviceNumber}</div><h2>{job.brand} {job.mobileModel}</h2><p>{job.reportedFault}</p><div className="ready-customer"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></div><div className="ready-card-meta"><span>Ready since <strong>{dateLabel(job.readyAt ?? job.inDate)}</strong></span><span>Balance <strong className={due ? "balance-due" : "balance-paid"}>{money(due)}</strong></span></div>{(canEditPayment || canReturn) && <div className="ready-card-actions">{canEditPayment && due > 0 && <Button variant="secondary" onClick={() => onPayment(job.id)}><CreditCard size={14} /> Collect payment</Button>}{canReturn && <Button onClick={() => onReturn(job)}><Check size={15} /> Mark returned</Button>}</div>}</article>;
+    })}</div> : <div className="panel"><EmptyState icon={CheckCircle2} title="Nothing waiting for pickup" detail="When a service job is marked Ready, you’ll find it here." action={canViewAllServices ? <Button variant="secondary" onClick={() => router.push("/services")}><Wrench size={15} /> View service jobs</Button> : undefined} /></div>}
   </>;
 }
 
@@ -1060,11 +1138,11 @@ function ServiceDetail({ service, settings, onBack, onPayment, onUpdate, canEdit
   return <>
     <PageHeader eyebrow="SERVICE JOB" title={service.serviceNumber} description={`${service.brand} ${service.mobileModel} · Received ${dateLabel(service.inDate)}`}><Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> All services</Button><Button variant="secondary" onClick={() => downloadServiceReceipt(service, settings)}><Download size={15} /> Download PDF</Button><Button variant="secondary" onClick={() => printReceipt(service, settings)}><Printer size={15} /> Print receipt</Button></PageHeader>
     <div className="detail-grid"><div className="detail-main">
-      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Repair status</h2><p>Track the job from intake through handover.</p></div><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit} onChange={(event) => onUpdate({ ...service, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : service.readyAt, deliveryOutDate: event.target.value === "Returned" ? new Date().toISOString() : service.deliveryOutDate })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></div><div className="status-timeline">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status, index) => { const completed = (["Received", "In progress", "Ready", "Returned"] as string[]).indexOf(service.status) >= index; return <div className={`timeline-step ${completed ? "done" : ""}`} key={status}><span>{completed ? <Check size={13} /> : index + 1}</span><strong>{status}</strong>{index < 3 && <i />}</div>; })}</div></section>
+      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Repair status</h2><p>Track the job from intake through handover.</p></div><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned"} onChange={(event) => onUpdate({ ...service, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : service.readyAt, deliveryOutDate: event.target.value === "Returned" ? new Date().toISOString() : service.deliveryOutDate })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></div><div className="status-timeline">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status, index) => { const completed = (["Received", "In progress", "Ready", "Returned"] as string[]).indexOf(service.status) >= index; return <div className={`timeline-step ${completed ? "done" : ""}`} key={status}><span>{completed ? <Check size={13} /> : index + 1}</span><strong>{status}</strong>{index < 3 && <i />}</div>; })}</div></section>
       <section className="panel detail-panel"><div className="panel-heading"><div><h2>Device & issue</h2><p>What came in, and what needs attention.</p></div></div><div className="detail-fields"><DetailField label="Customer" value={service.customerName} /><DetailField label="Contact number" value={service.contactNumber} /><DetailField label="Device" value={`${service.brand} ${service.mobileModel}`} /><DetailField label="IMEI" value={service.imei || "Not recorded"} /><DetailField label="Reported fault" value={service.reportedFault} /><DetailField label="Received condition" value={service.receivedConditions.join(", ") || "Not specified"} /><DetailField label="Technician notes" value={service.technicianNotes || "—"} /><DetailField label="Additional remarks" value={service.remarks || "—"} /></div><div className="credential-notice"><ShieldCheck size={16} /><span>Device unlock credentials are not collected or shown on this job record.</span></div></section>
       <section className="panel detail-panel"><div className="panel-heading"><div><h2>Payment history</h2><p>Payments are recorded as separate entries.</p></div>{canEdit && due > 0 && <Button variant="secondary" onClick={() => onPayment(service.id)}><Plus size={14} /> Add payment</Button>}</div>{service.payments.length ? <div className="payment-history">{service.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section>
-      {(service.deliveryHistory?.length ?? 0) > 0 && <section className="panel detail-panel"><div className="panel-heading"><div><h2>Delivery history</h2><p>Recorded handovers for this device.</p></div></div><div className="payment-history">{service.deliveryHistory?.slice().reverse().map((entry, index) => <div className="payment-row" key={`${entry.date}-${index}`}><span className="payment-method-icon"><CheckCircle2 size={15} /></span><span><strong>Handed over to customer</strong><small>{dateLabel(entry.date)} · {entry.person}{entry.remarks ? ` · ${entry.remarks}` : ""}</small></span></div>)}</div></section>}
-    </div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service balance</strong><small>{service.status}</small></span></div><div className="total-lines"><span>Service amount <strong>{money(service.serviceAmount)}</strong></span><span>Discount <strong>− {money(service.discount)}</strong></span><span>Amount paid <strong>{money(paymentTotal(service.payments))}</strong></span><div className="total-final"><span>Balance due</span><strong>{money(due)}</strong></div></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(service.id)}><CreditCard size={15} /> Record payment</Button>}</div>{service.deliveryOutDate && <div className="panel delivery-note"><CheckCircle2 size={17} /><strong>Device returned</strong><span>{dateLabel(service.deliveryOutDate)}{service.deliveryOutPerson ? ` · ${service.deliveryOutPerson}` : ""}</span>{service.deliveryRemarks && <small>{service.deliveryRemarks}</small>}</div>}</aside></div>
+      {(service.deliveryHistory?.length ?? 0) > 0 && <section className="panel detail-panel"><div className="panel-heading"><div><h2>Delivery history</h2><p>Recorded handovers for this device.</p></div></div><div className="payment-history">{service.deliveryHistory?.slice().reverse().map((entry, index) => <div className="payment-row" key={`${entry.date}-${index}`}><span className="payment-method-icon"><CheckCircle2 size={15} /></span><span><strong>Handed over to customer</strong><small>{dateLabel(entry.date)} · Picked up by {entry.person}{entry.staff ? ` · Returned by ${entry.staff}` : ""}{entry.remarks ? ` · ${entry.remarks}` : ""}</small></span></div>)}</div></section>}
+    </div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service balance</strong><small>{service.status}</small></span></div><div className="total-lines"><span>Service amount <strong>{money(service.serviceAmount)}</strong></span><span>Discount <strong>− {money(service.discount)}</strong></span><span>Amount paid <strong>{money(paymentTotal(service.payments))}</strong></span><div className="total-final"><span>Balance due</span><strong>{money(due)}</strong></div></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(service.id)}><CreditCard size={15} /> Record payment</Button>}</div>{service.deliveryOutDate && <div className="panel delivery-note"><CheckCircle2 size={17} /><strong>Device returned</strong><span>{dateLabel(service.deliveryOutDate)}{service.deliveryOutPerson ? ` · Picked up by ${service.deliveryOutPerson}` : ""}{service.deliveryOutStaff ? ` · Returned by ${service.deliveryOutStaff}` : ""}</span>{service.deliveryRemarks && <small>{service.deliveryRemarks}</small>}</div>}</aside></div>
   </>;
 }
 
@@ -1197,7 +1275,8 @@ function CustomersPage({ customers, sales, services, search, onSearch, onAdd, se
     const customer = customers.find((item) => item.id === selectedId);
     if (!customer) return <NotFound title="Customer not found" backLabel="Back to customers" onBack={() => onView("")} />;
     const customerSales = sales.filter((sale) => sale.customerId === customer.id);
-    const customerServices = services.filter((service) => service.customerId === customer.id);
+    const customerServices = services.filter((service) => service.customerId === customer.id)
+      .sort((a, b) => (b.createdAt || b.inDate).localeCompare(a.createdAt || a.inDate));
     const outstanding = customerSales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0)
       + customerServices.reduce((sum, service) => sum + Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)), 0);
     const paymentHistory = [
@@ -1258,8 +1337,90 @@ function ReportsPage({ sales, services }: { sales: Sale[]; services: ServiceJob[
     const csv = rows.map((row) => row.map((field) => `"${field.replaceAll('"', '""')}"`).join(",")).join("\r\n");
     const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); link.download = `ahmobiles-report-${dateInputValue()}.csv`; link.click(); URL.revokeObjectURL(link.href);
   };
+  const exportServicesPdf = () => {
+    const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 10;
+    const columns = [
+      { title: "SERVICE BILL", width: 22 },
+      { title: "DATE", width: 21 },
+      { title: "CUSTOMER", width: 34 },
+      { title: "CONTACT", width: 23 },
+      { title: "DEVICE", width: 34 },
+      { title: "REPORTED FAULT", width: 52 },
+      { title: "STATUS", width: 22 },
+      { title: "TOTAL", width: 22 },
+      { title: "PAID", width: 22 },
+      { title: "BALANCE", width: 22 },
+    ];
+    const orderedServices = filteredServices.slice()
+      .sort((a, b) => (b.createdAt || b.inDate).localeCompare(a.createdAt || a.inDate));
+    const serviceTotal = orderedServices.reduce((sum, service) => sum + service.serviceAmount - service.discount, 0);
+    const servicePaid = orderedServices.reduce((sum, service) => sum + paymentTotal(service.payments), 0);
+    const serviceDue = orderedServices.reduce((sum, service) => sum + Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)), 0);
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(16);
+    pdf.text("Service Data Report", margin, 13);
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(9);
+    pdf.text(`Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`, margin, 20);
+    pdf.text(`Jobs: ${orderedServices.length}  |  Total: ${pdfMoney(serviceTotal)}  |  Paid: ${pdfMoney(servicePaid)}  |  Balance: ${pdfMoney(serviceDue)}`, margin, 26);
+
+    const drawTableHeader = (y: number) => {
+      pdf.setFillColor(238, 242, 248);
+      pdf.rect(margin, y - 4, pageWidth - margin * 2, 7, "F");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(7);
+      let x = margin;
+      columns.forEach((column) => {
+        pdf.text(column.title, x + 1, y);
+        x += column.width;
+      });
+      pdf.setFont("helvetica", "normal");
+      return y + 6;
+    };
+    let y = drawTableHeader(34);
+    orderedServices.forEach((service) => {
+      const paid = paymentTotal(service.payments);
+      const balance = Math.max(0, service.serviceAmount - service.discount - paid);
+      const values = [
+        service.serviceNumber,
+        dateLabel(service.inDate),
+        service.customerName,
+        service.contactNumber,
+        `${service.brand} ${service.mobileModel}`,
+        service.reportedFault,
+        service.status,
+        pdfMoney(service.serviceAmount - service.discount),
+        pdfMoney(paid),
+        pdfMoney(balance),
+      ];
+      const lines = values.map((value, index) => pdf.splitTextToSize(value || "—", columns[index].width - 2) as string[]);
+      const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
+      if (y + rowHeight > pageHeight - 12) {
+        pdf.addPage();
+        y = drawTableHeader(14);
+      }
+      let x = margin;
+      lines.forEach((cellLines, index) => {
+        pdf.text(cellLines, x + 1, y, { maxWidth: columns[index].width - 2 });
+        x += columns[index].width;
+      });
+      y += rowHeight;
+      pdf.setDrawColor(225, 230, 238);
+      pdf.line(margin, y - 2, pageWidth - margin, y - 2);
+    });
+    const pageCount = pdf.getNumberOfPages();
+    for (let page = 1; page <= pageCount; page += 1) {
+      pdf.setPage(page);
+      pdf.setFontSize(8);
+      pdf.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 5, { align: "right" });
+    }
+    pdf.save(`ahmobiles-service-report-${dateInputValue()}.pdf`);
+  };
   return <>
-    <PageHeader eyebrow="BUSINESS INSIGHTS" title="Reports" description="A clear picture of sales, services, and the money collected."><Button variant="secondary" onClick={exportCsv}><Download size={15} /> Export CSV</Button></PageHeader>
+    <PageHeader eyebrow="BUSINESS INSIGHTS" title="Reports" description="A clear picture of sales, services, and the money collected."><Button variant="secondary" onClick={exportServicesPdf}><Download size={15} /> Export services PDF</Button><Button variant="secondary" onClick={exportCsv}><Download size={15} /> Export CSV</Button></PageHeader>
     <section className="panel report-filter"><div><strong>Report period</strong><span>Choose a date range for your records.</span></div><div className="date-range"><label>From<input className="input" type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><ArrowRight size={15} /><label>To<input className="input" type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label><button className="text-link" onClick={() => { setFrom(""); setTo(""); }}>Clear</button></div></section>
     <div className="report-metrics">{[{ label: "Sales billed", value: money(salesTotal), note: `${filteredSales.length} invoices`, icon: CreditCard }, { label: "Service revenue", value: money(filteredServices.reduce((sum, item) => sum + item.serviceAmount - item.discount, 0)), note: `${filteredServices.length} jobs`, icon: Wrench }, { label: "Collected", value: money(collected), note: "Sales & service payments", icon: CheckCircle2 }, { label: "Outstanding", value: money(due), note: "Remaining balances", icon: Clock3 }].map(({ label, value, note, icon: Icon }) => <div className="panel report-metric" key={label}><span className="metric-icon blue"><Icon size={17} /></span><span>{label}<strong>{value}</strong><small>{note}</small></span></div>)}</div>
     <div className="reports-grid"><section className="panel report-chart-panel"><div className="panel-heading"><div><h2>Revenue over time</h2><p>Filtered invoice and service totals</p></div></div>{filteredSales.length + filteredServices.length ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartForPeriod({ ...EMPTY_DATA, sales: filteredSales, services: filteredServices }, "Month")}><CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><Tooltip formatter={(value) => money(Number(value))} /><Area type="monotone" dataKey="sales" stroke="#4777f5" fill="#4777f5" fillOpacity={0.12} /><Area type="monotone" dataKey="services" stroke="#22ad94" fill="#22ad94" fillOpacity={0.12} /></AreaChart></ResponsiveContainer></div> : <EmptyState icon={BarChart3} title="Your reports will grow with you" detail="Add sales and service jobs to see your revenue trends." />}</section><section className="panel report-status-panel"><div className="panel-heading"><div><h2>Service status</h2><p>Jobs by current stage</p></div></div>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => { const count = filteredServices.filter((service) => service.status === status).length; const ratio = filteredServices.length ? count / filteredServices.length * 100 : 0; return <div className="report-status" key={status}><div><span>{status}</span><strong>{count}</strong></div><div className="progress-track"><i className={`progress-${statusClass(status)}`} style={{ width: `${ratio}%` }} /></div></div>; })}</section></div>
@@ -1339,11 +1500,10 @@ function SettingsPage({ settings, identity, canEdit, onSave, onChangePassword }:
           </div>
         </section>
         </fieldset>
-        {!firebaseConfigured && <div className="panel setup-card"><span className="setup-icon"><ShieldCheck size={18} /></span><div><strong>Connect Firebase for production</strong><p>Local preview data stays in this browser. Add Firebase environment variables and deploy the included Firestore rules before entering real business data.</p><code>.env.local ← .env.example</code></div></div>}
         {canEdit && <div className="form-footer"><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={16} /> Save settings</>}</Button></div>}
       </div>
       <aside className="settings-aside">
-        <div className="panel settings-note"><span className="settings-note-icon"><ShieldCheck size={17} /></span><h3>Your data, kept safe.</h3><p>When Firebase is connected, each workspace is scoped to its authenticated owner. Configure Firestore rules before going live.</p><a href="https://firebase.google.com/docs/firestore/security/get-started" target="_blank" rel="noreferrer">Read about Firestore security <ArrowRight size={13} /></a></div>
+        <div className="panel settings-note"><span className="settings-note-icon"><ShieldCheck size={17} /></span><h3>Your data, kept safe.</h3><p>Each workspace is scoped to its authenticated owner. Keep Firestore rules deployed and up to date.</p><a href="https://firebase.google.com/docs/firestore/security/get-started" target="_blank" rel="noreferrer">Read about Firestore security <ArrowRight size={13} /></a></div>
         <div className="panel settings-note"><span className="settings-note-icon violet-icon"><Zap size={17} /></span><h3>Made for India.</h3><p>Currency is displayed in Indian rupees (₹) and dates use the Indian format.</p></div>
       </aside>
     </form>
@@ -1444,9 +1604,9 @@ function AccountAccessSettings({ identity, onChangePassword }: {
     {identity && <section className="panel form-panel">
       <div className="form-section-head"><span className="step-number"><ShieldCheck size={16} /></span><div><h2>Account security</h2><p>Change the password for your {identity.role} sign-in.</p></div></div>
       <div className="form-grid two-col">
-        <FormField label="Current password"><input className="input" type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></FormField>
-        <FormField label="New password"><input className="input" type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></FormField>
-        <FormField label="Confirm new password"><input className="input" type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></FormField>
+        <FormField label="Current password"><PasswordInput autoComplete="current-password" value={currentPassword} onChange={setCurrentPassword} /></FormField>
+        <FormField label="New password"><PasswordInput autoComplete="new-password" value={newPassword} onChange={setNewPassword} /></FormField>
+        <FormField label="Confirm new password"><PasswordInput autoComplete="new-password" value={confirmPassword} onChange={setConfirmPassword} /></FormField>
       </div>
       <div className="form-footer"><Button variant="secondary" disabled={busy || !currentPassword || !newPassword || !confirmPassword} onClick={() => void savePassword()}>Change password</Button></div>
       {passwordError && <div className="form-alert" role="alert">{passwordError}</div>}
@@ -1455,7 +1615,7 @@ function AccountAccessSettings({ identity, onChangePassword }: {
       <div className="form-section-head"><span className="step-number"><Users size={16} /></span><div><h2>Employee access</h2><p>Create staff logins and choose which modules they can view or edit.</p></div></div>
       <div className="form-grid two-col employee-create-fields">
         <FormField label="Username"><input className="input" autoComplete="off" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="e.g. sales.staff" /></FormField>
-        <FormField label="Temporary password"><input className="input" type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></FormField>
+        <FormField label="Temporary password"><PasswordInput autoComplete="new-password" value={password} onChange={setPassword} placeholder="At least 8 characters" /></FormField>
       </div>
       <div className="employee-permissions">
         {EMPLOYEE_MODULES.map(({ key, label }) => <label className="employee-permission" key={key}><span>{label}</span><select className="input" value={permissions[key]} onChange={(event) => setPermissions((current) => ({ ...current, [key]: event.target.value as ModuleAccess }))}><option value="none">No access</option><option value="view">View only</option><option value="edit">Edit</option></select></label>)}
@@ -1496,24 +1656,24 @@ function DeliveryModal({ service, onCancel, onSave }: {
   onSave: (delivery: Pick<ServiceJob, "deliveryOutDate" | "deliveryOutPerson" | "deliveryRemarks">) => Promise<void>;
 }) {
   const [date, setDate] = useState(dateInputValue());
-  const [person, setPerson] = useState("");
+  const [customerName, setCustomerName] = useState("");
   const [remarks, setRemarks] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!person.trim()) { setError("Enter who handed the device back."); return; }
+    if (!customerName.trim()) { setError("Enter the name of the customer picking up the device."); return; }
     if (!date) { setError("Choose the handover date."); return; }
     setSaving(true);
     try {
       await onSave({
         deliveryOutDate: businessDateTime(date),
-        deliveryOutPerson: person.trim(),
+        deliveryOutPerson: customerName.trim(),
         deliveryRemarks: remarks.trim(),
       });
     } finally { setSaving(false); }
   };
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">SERVICE HANDOVER</span><h2>Mark device as returned?</h2></div><button className="icon-btn" type="button" onClick={onCancel} aria-label="Close"><X size={18} /></button></div><p className="delivery-modal-copy"><strong>{service.serviceNumber}</strong> · {service.customerName}<br />Confirm the handover details before closing this job.</p><div className="modal-fields"><FormField label="Delivery out date"><input className="input" type="date" value={date} onChange={(event) => setDate(event.target.value)} /></FormField><FormField label="Delivered by"><input className="input" value={person} onChange={(event) => setPerson(event.target.value)} placeholder="Staff member name" autoFocus /></FormField><FormField label="Delivery remarks (optional)"><textarea className="input textarea" value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder="Notes about the handover" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} /> Confirm handover</>}</Button></div></form></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">SERVICE HANDOVER</span><h2>Mark device as returned?</h2></div><button className="icon-btn" type="button" onClick={onCancel} aria-label="Close"><X size={18} /></button></div><p className="delivery-modal-copy"><strong>{service.serviceNumber}</strong> · {service.customerName}<br />Confirm the handover details before closing this job.</p><div className="modal-fields"><FormField label="Delivery out date"><input className="input" type="date" value={date} onChange={(event) => setDate(event.target.value)} /></FormField><FormField label="Customer picking up"><input className="input" value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Customer name" autoFocus /></FormField><FormField label="Delivery remarks (optional)"><textarea className="input textarea" value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder="Notes about the handover" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} /> Confirm handover</>}</Button></div></form></div>;
 }
 
 function Pagination({ page, pages, total, pageSize, onPage }: { page: number; pages: number; total: number; pageSize: number; onPage: (page: number) => void }) {

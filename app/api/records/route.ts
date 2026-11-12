@@ -42,6 +42,7 @@ const saleSchema = z.object({
 
 const serviceSchema = z.object({
   ...commonSchema,
+  serviceNumber: z.string().trim().min(1).max(120).optional(),
   inDate: z.string().datetime(),
   brand: z.string().trim().min(1).max(80),
   mobileModel: z.string().trim().min(1).max(120),
@@ -156,12 +157,17 @@ export async function POST(request: Request) {
     const counterRef = db.doc(`shops/${uid}/counters/${kind}-${year}`);
     const recordRef = db.doc(`shops/${uid}/${kind}/${recordId}`);
     const customerRef = db.doc(`shops/${uid}/customers/${customerId}`);
+    const requestedServiceNumber = kind === "services" ? record.serviceNumber?.trim() : undefined;
     const invoiceNumber = await db.runTransaction(async (transaction) => {
       const [counterSnapshot, customerSnapshot, matchingCustomers] = await Promise.all([
         transaction.get(counterRef),
         transaction.get(customerRef),
         transaction.get(db.collection(`shops/${uid}/customers`).where("phone", "==", record.contactNumber).limit(1)),
       ]);
+      const matchingServiceNumbers = requestedServiceNumber
+        ? await transaction.get(db.collection(`shops/${uid}/services`).where("serviceNumber", "==", requestedServiceNumber).limit(1))
+        : undefined;
+      if (matchingServiceNumbers?.size) throw new Error("SERVICE_NUMBER_EXISTS");
       const existingCustomer = customerSnapshot.exists ? customerSnapshot : matchingCustomers.docs[0];
       const resolvedCustomerRef = existingCustomer?.ref ?? customerRef;
       const resolvedCustomerId = resolvedCustomerRef.id;
@@ -184,7 +190,11 @@ export async function POST(request: Request) {
       const current = counterSnapshot.exists ? Number(counterSnapshot.data()?.value) : 0;
       if (!Number.isSafeInteger(current) || current < 0) throw new Error("COUNTER_INVALID");
       const next = current + 1;
-      const number = `${prefix}-${year}-${String(next).padStart(4, "0")}`;
+      const generatedNumber = `${prefix}-${year}-${String(next).padStart(4, "0")}`;
+      const number = requestedServiceNumber || generatedNumber;
+      const requestedSequence = requestedServiceNumber
+        ? Number(requestedServiceNumber.match(new RegExp(`^${prefix}-${year}-(\\d+)$`))?.[1] ?? 0)
+        : 0;
       const common = {
         ...record,
         id: recordId,
@@ -212,7 +222,10 @@ export async function POST(request: Request) {
           payments: initialPayments,
         });
       }
-      transaction.set(counterRef, { value: next, updatedAt: FieldValue.serverTimestamp() });
+      transaction.set(counterRef, {
+        value: requestedServiceNumber ? Math.max(current, requestedSequence) : next,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
       for (const payment of initialPayments) {
         transaction.create(db.doc(`shops/${uid}/payments/${payment.id}`), paymentDocument(actor.uid, kind, recordId, payment));
       }
@@ -231,6 +244,9 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof Error && error.message === "CUSTOMER_CONTACT_MISMATCH") {
       return responseError("The selected customer has a different contact number.", 409);
+    }
+    if (error instanceof Error && error.message === "SERVICE_NUMBER_EXISTS") {
+      return responseError("That service bill number is already in use.", 409);
     }
     if (error instanceof Error && error.message === "COUNTER_INVALID") {
       return responseError("The invoice sequence is invalid. Contact your administrator.", 500);
@@ -251,8 +267,11 @@ export async function PATCH(request: Request) {
   catch { return responseError("Request body must be valid JSON.", 400); }
   const parsed = patchSchema.safeParse(raw);
   if (!parsed.success) return responseError(parsed.error.issues[0]?.message ?? "The update data is invalid.", 400);
-  const recordModule = parsed.data.action === "payment" ? parsed.data.kind : "services";
-  if (!actorHasAccess(actor, recordModule, "edit")) return responseError("You do not have edit access to this module.", 403);
+  const canEditRecord = parsed.data.action === "payment"
+    ? actorHasAccess(actor, parsed.data.kind, "edit")
+    : actorHasAccess(actor, "services", "edit")
+      || (parsed.data.status === "Returned" && actorHasAccess(actor, "ready", "edit"));
+  if (!canEditRecord) return responseError("You do not have edit access to this module.", 403);
 
   try {
     const uid = actor.shopId;
@@ -310,11 +329,15 @@ export async function PATCH(request: Request) {
         }
         patch.deliveryOutDate = update.deliveryOutDate;
         patch.deliveryOutPerson = update.deliveryOutPerson;
+        patch.deliveryOutStaff = actor.username;
+        patch.deliveryOutStaffId = actor.uid;
         patch.deliveryRemarks = update.deliveryRemarks ?? "";
         const history = Array.isArray(record.deliveryHistory) ? record.deliveryHistory : [];
         patch.deliveryHistory = [...history, {
           date: update.deliveryOutDate,
           person: update.deliveryOutPerson,
+          staff: actor.username,
+          staffId: actor.uid,
           remarks: update.deliveryRemarks ?? "",
         }];
       }

@@ -18,8 +18,10 @@ import {
   getFirestore,
   getDoc,
   onSnapshot,
+  query,
   setDoc,
   Timestamp,
+  where,
   type Unsubscribe,
 } from "firebase/firestore";
 import type {
@@ -137,6 +139,8 @@ export async function removeEmployee(employeeId: string): Promise<void> {
 function canReadModule(identity: WorkspaceIdentity, module: EmployeeModule): boolean {
   if (identity.role === "admin") return true;
   if (identity.permissions[module] !== "none") return true;
+  if (identity.permissions.overview !== "none" && ["sales", "services", "customers"].includes(module)) return true;
+  if (module === "services" && identity.permissions.ready !== "none") return true;
   return (module === "sales" || module === "services") && identity.permissions.reports !== "none";
 }
 
@@ -178,7 +182,15 @@ export function observeWorkspace(
     }, (reason) => handleError(reason, "sales")));
   else loaded.sales = true;
 
-  if (canReadModule(identity, "services")) stops.push(onSnapshot(path("services"), (snapshot) => {
+  const readyOnlyServices = identity.role === "employee"
+    && identity.permissions.services === "none"
+    && identity.permissions.reports === "none"
+    && identity.permissions.overview === "none"
+    && identity.permissions.ready !== "none";
+  const servicesRef = readyOnlyServices
+    ? query(path("services"), where("status", "==", "Ready"))
+    : path("services");
+  if (canReadModule(identity, "services")) stops.push(onSnapshot(servicesRef, (snapshot) => {
       services = snapshot.docs.map((item) => {
         const service = item.data() as Omit<ServiceJob, "id">;
         return {

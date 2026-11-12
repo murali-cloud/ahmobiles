@@ -7,8 +7,10 @@ const usernameSchema = z.string().trim().min(3).max(30).regex(/^[a-zA-Z0-9._-]+$
 const passwordSchema = z.string().min(8).max(128);
 const accessSchema = z.enum(["none", "view", "edit"]);
 const permissionsSchema = z.object({
+  overview: accessSchema,
   sales: accessSchema,
   services: accessSchema,
+  ready: accessSchema,
   customers: accessSchema,
   reports: accessSchema,
   settings: accessSchema,
