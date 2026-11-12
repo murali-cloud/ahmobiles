@@ -1,5 +1,6 @@
 import type { Customer, Sale, ServiceJob, ShopSettings, WorkspaceData } from "./types";
 import { DEFAULT_SETTINGS, EMPTY_WORKSPACE } from "./types";
+import { normalizePhoneNumber } from "./phone";
 
 const STORAGE_KEY = "ahmobiles.workspace.v1";
 
@@ -25,7 +26,8 @@ export function writeLocalWorkspace(data: WorkspaceData): void {
 }
 
 export function makeCustomer(name: string, phone: string, customers: Customer[]): Customer {
-  const existing = customers.find((customer) => customer.phone.replace(/\D/g, "") === phone.replace(/\D/g, ""));
+  const normalizedPhone = normalizePhoneNumber(phone);
+  const existing = customers.find((customer) => normalizePhoneNumber(customer.phone) === normalizedPhone);
   return existing ?? { id: crypto.randomUUID(), name, phone, createdAt: new Date().toISOString() };
 }
 

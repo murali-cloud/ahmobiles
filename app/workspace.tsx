@@ -22,6 +22,7 @@ import {
   makeCustomer, nextInvoiceNumber, patchSettings, readLocalWorkspace,
   updateLocalRecord, writeLocalWorkspace,
 } from "./lib/local-data";
+import { normalizePhoneNumber } from "./lib/phone";
 import {
   DEFAULT_SETTINGS, EMPLOYEE_MODULES, NO_EMPLOYEE_PERMISSIONS, type Customer, type EmployeeAccount,
   type EmployeeModule, type EmployeePermissions, type ModuleAccess, type Payment, type PaymentStatus,
@@ -479,7 +480,7 @@ export default function Workspace() {
           const parsed = customerSchema.safeParse({ name, phone, email });
           if (!parsed.success) throw new Error(parsed.error.issues[0]?.message);
           const duplicate = data.customers.find((item) =>
-            item.id !== customer.id && item.phone.replace(/\D/g, "") === phone.replace(/\D/g, ""));
+            item.id !== customer.id && normalizePhoneNumber(item.phone) === normalizePhoneNumber(phone));
           if (duplicate) throw new Error(`This number already belongs to ${duplicate.name}.`);
           const updated = { ...customer, name: name.trim(), phone: phone.trim(), email: email.trim() };
           if (firebaseConfigured && user) await writeRecord(user.shopId, "customers", updated.id, updated);
@@ -1002,7 +1003,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState(false);
   const generatedInvoiceNumber = nextInvoiceNumber("sales", data.settings.salesPrefix || "SAL", data.sales);
-  const { register, handleSubmit, control, formState: { errors } } = useForm({
+  const { register, handleSubmit, control, setValue, formState: { errors } } = useForm({
     resolver: zodResolver(saleSchema.omit({ products: true })),
     defaultValues: { customerName: "", contactNumber: "", invoiceDate: dateInputValue(), invoiceNumber: generatedInvoiceNumber, discount: 0, tax: 0, amountPaid: 0 },
   });
@@ -1012,7 +1013,12 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
   const invoiceNumber = useWatch({ control, name: "invoiceNumber" });
   const total = products.reduce((sum, product) => sum + Math.max(0, product.quantity * product.rate - product.discount), 0);
   const final = Math.max(0, total + tax);
-  const matchingCustomer = data.customers.find((customer) => phone && customer.phone.replace(/\D/g, "") === phone.replace(/\D/g, ""));
+  const normalizedPhone = normalizePhoneNumber(phone ?? "");
+  const matchingCustomer = data.customers.find((customer) =>
+    normalizedPhone.length >= 7 && normalizePhoneNumber(customer.phone) === normalizedPhone);
+  useEffect(() => {
+    if (matchingCustomer) setValue("customerName", matchingCustomer.name);
+  }, [matchingCustomer, setValue]);
   const addProduct = () => setProducts((current) => [...current, { id: newId(), brand: "", model: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
   const updateProduct = (id: string, key: keyof ProductLine, value: string | number) => setProducts((current) => current.map((item) => item.id === id ? { ...item, [key]: value } : item));
   const saveDraft = async (form: { customerName: string; contactNumber: string; invoiceDate: string; invoiceNumber: string }, printAfterSave = false) => {
@@ -1037,12 +1043,13 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
       setFieldErrors({ amountPaid: "Amount paid cannot exceed the final amount." });
       return;
     }
-    const customer = data.customers.find((item) => item.phone.replace(/\D/g, "") === form.contactNumber.replace(/\D/g, ""));
+    const customer = data.customers.find((item) =>
+      normalizePhoneNumber(item.phone) === normalizePhoneNumber(form.contactNumber));
     const payments: Payment[] = paid ? [{ id: newId(), amount: paid, date: new Date().toISOString(), notes: "Payment at sale" }] : [];
     const saved = await onSubmit({
       invoiceNumber: trimmedInvoiceNumber,
       customerId: customer?.id ?? "",
-      customerName: form.customerName.trim(),
+      customerName: customer?.name ?? form.customerName.trim(),
       contactNumber: form.contactNumber.trim(),
       invoiceDate: businessDateTime(form.invoiceDate),
       products: products.map((item) => ({ ...item })),
@@ -1136,7 +1143,8 @@ function ServiceForm({ customers, services, settings, busy, onSubmit, onCancel }
     }
     const parsed = serviceSchema.safeParse({ ...form, receivedConditions: conditions, serviceAmount: amount, discount });
     if (!parsed.success) { setFormError(parsed.error.issues[0]?.message ?? "Check the form details."); return; }
-    const customer = customers.find((item) => item.phone.replace(/\D/g, "") === form.contactNumber.replace(/\D/g, ""));
+    const customer = customers.find((item) =>
+      normalizePhoneNumber(item.phone) === normalizePhoneNumber(form.contactNumber));
     const saved = await onSubmit({
       customerId: customer?.id ?? "", customerName: form.customerName.trim(), contactNumber: form.contactNumber.trim(),
       inDate: businessDateTime(form.inDate), brand: form.brand.trim(), mobileModel: form.mobileModel.trim(),

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { actorHasAccess, adminDatabase, authenticatedActor } from "@/app/lib/firebase-admin";
+import { normalizePhoneNumber } from "@/app/lib/phone";
 
 const paymentSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
@@ -179,8 +180,8 @@ export async function POST(request: Request) {
       const resolvedCustomerRef = existingCustomer?.ref ?? customerRef;
       const resolvedCustomerId = resolvedCustomerRef.id;
       if (existingCustomer) {
-        const existingPhone = String(existingCustomer.data()?.phone ?? "").replace(/\D/g, "");
-        const submittedPhone = record.contactNumber.replace(/\D/g, "");
+        const existingPhone = normalizePhoneNumber(String(existingCustomer.data()?.phone ?? ""));
+        const submittedPhone = normalizePhoneNumber(record.contactNumber);
         if (existingPhone && existingPhone !== submittedPhone) {
           throw new Error("CUSTOMER_CONTACT_MISMATCH");
         }
