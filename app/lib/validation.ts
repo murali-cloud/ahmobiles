@@ -14,6 +14,24 @@ export const customerSchema = z.object({
   email: z.union([z.literal(""), z.string().trim().email("Enter a valid email address.")]),
 });
 
+export const serviceVendorSchema = z.object({
+  name: z.string().trim().min(2, "Enter the vendor name.").max(120),
+  phone: phone,
+});
+
+export const vendorServiceFormSchema = z.object({
+  serviceNumber: z.string().trim().min(1, "Enter the service bill number.").max(120),
+  inDate: z.string().min(1, "Choose an intake date."),
+  customerName: z.string().trim().min(2, "Enter the customer's name."),
+  brand: z.string().trim().min(1, "Enter the device brand."),
+  mobileModel: z.string().trim().min(1, "Enter the device model."),
+  customerNumber: phone,
+  status: z.enum(["Received", "In progress", "Ready", "Returned"]),
+  deliveryDate: z.string(),
+  deliveryCustomer: z.string().trim().max(120),
+  serviceCharge: money,
+});
+
 export const productSchema = z.object({
   id: z.string(),
   brand: z.string().trim().min(1, "Enter a brand."),
@@ -39,6 +57,7 @@ export const saleSchema = z.object({
 });
 
 const serviceFieldsSchema = z.object({
+  vendorId: z.string().max(128).optional(),
   customerName: z.string().trim().min(2, "Enter the customer's name."),
   contactNumber: phone,
   inDate: z.string().min(1, "Choose an intake date."),

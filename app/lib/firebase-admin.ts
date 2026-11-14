@@ -87,6 +87,12 @@ export function actorHasAccess(
   const level = actor.permissions[module];
   if (access === "edit") return level === "edit";
   if (level === "view" || level === "edit") return true;
+  if (module === "vendors" && (
+    actor.permissions.overview !== "none"
+    || actor.permissions.services !== "none"
+    || actor.permissions.ready !== "none"
+    || actor.permissions.reports !== "none"
+  )) return true;
   if (actor.permissions.overview !== "none" && ["sales", "services", "customers"].includes(module)) return true;
   if (module === "services" && actor.permissions.ready !== "none") return true;
   return (module === "sales" || module === "services")

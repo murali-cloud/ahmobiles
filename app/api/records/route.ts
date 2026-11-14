@@ -45,6 +45,7 @@ const saleSchema = z.object({
 const serviceSchema = z.object({
   ...commonSchema,
   serviceNumber: z.string().trim().min(1).max(120).optional(),
+  vendorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
   inDate: z.string().datetime(),
   brand: z.string().trim().min(1).max(80),
   mobileModel: z.string().trim().min(1).max(120),
@@ -83,6 +84,11 @@ const patchSchema = z.discriminatedUnion("action", [
     deliveryOutPerson: z.string().trim().min(1).max(120).optional(),
     deliveryRemarks: z.string().max(2000).optional(),
     readyAt: z.string().datetime().optional(),
+  }).strict(),
+  z.object({
+    action: z.literal("service-vendor"),
+    recordId: z.string().uuid(),
+    vendorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).nullable(),
   }).strict(),
 ]);
 
@@ -161,6 +167,7 @@ export async function POST(request: Request) {
     const customerRef = db.doc(`shops/${uid}/customers/${customerId}`);
     const requestedInvoiceNumber = kind === "sales" ? record.invoiceNumber?.trim() : undefined;
     const requestedServiceNumber = kind === "services" ? record.serviceNumber?.trim() : undefined;
+    const requestedVendorId = kind === "services" ? record.vendorId : undefined;
     const requestedNumber = requestedInvoiceNumber || requestedServiceNumber;
     const invoiceNumber = await db.runTransaction(async (transaction) => {
       const [counterSnapshot, customerSnapshot, matchingCustomers] = await Promise.all([
@@ -168,6 +175,11 @@ export async function POST(request: Request) {
         transaction.get(customerRef),
         transaction.get(db.collection(`shops/${uid}/customers`).where("phone", "==", record.contactNumber).limit(1)),
       ]);
+      const vendorSnapshot = requestedVendorId
+        ? await transaction.get(db.doc(`shops/${uid}/vendors/${requestedVendorId}`))
+        : undefined;
+      if (requestedVendorId && !vendorSnapshot?.exists) throw new Error("VENDOR_NOT_FOUND");
+      if (vendorSnapshot?.data()?.deleting === true) throw new Error("VENDOR_DELETING");
       const matchingServiceNumbers = requestedServiceNumber
         ? await transaction.get(db.collection(`shops/${uid}/services`).where("serviceNumber", "==", requestedServiceNumber).limit(1))
         : undefined;
@@ -259,6 +271,12 @@ export async function POST(request: Request) {
     if (error instanceof Error && error.message === "INVOICE_NUMBER_EXISTS") {
       return responseError("That invoice number is already in use.", 409);
     }
+    if (error instanceof Error && error.message === "VENDOR_NOT_FOUND") {
+      return responseError("The selected service vendor could not be found.", 400);
+    }
+    if (error instanceof Error && error.message === "VENDOR_DELETING") {
+      return responseError("This service vendor is being deleted. Select another vendor.", 409);
+    }
     if (error instanceof Error && error.message === "COUNTER_INVALID") {
       return responseError("The invoice sequence is invalid. Contact your administrator.", 500);
     }
@@ -280,8 +298,10 @@ export async function PATCH(request: Request) {
   if (!parsed.success) return responseError(parsed.error.issues[0]?.message ?? "The update data is invalid.", 400);
   const canEditRecord = parsed.data.action === "payment"
     ? actorHasAccess(actor, parsed.data.kind, "edit")
-    : actorHasAccess(actor, "services", "edit")
-      || (parsed.data.status === "Returned" && actorHasAccess(actor, "ready", "edit"));
+    : parsed.data.action === "service-status"
+      ? actorHasAccess(actor, "services", "edit")
+        || (parsed.data.status === "Returned" && actorHasAccess(actor, "ready", "edit"))
+      : actorHasAccess(actor, "services", "edit");
   if (!canEditRecord) return responseError("You do not have edit access to this module.", 403);
 
   try {
@@ -318,6 +338,23 @@ export async function PATCH(request: Request) {
           amount: payment.amount,
           createdAt: FieldValue.serverTimestamp(),
           createdBy: actor.uid,
+        });
+      });
+      return Response.json({ success: true });
+    }
+
+    if (update.action === "service-vendor") {
+      const recordRef = db.doc(`shops/${uid}/services/${update.recordId}`);
+      const vendorRef = update.vendorId ? db.doc(`shops/${uid}/vendors/${update.vendorId}`) : undefined;
+      await db.runTransaction(async (transaction) => {
+        const recordSnapshot = await transaction.get(recordRef);
+        const vendorSnapshot = vendorRef ? await transaction.get(vendorRef) : undefined;
+        if (!recordSnapshot.exists) throw new Error("RECORD_NOT_FOUND");
+        if (vendorRef && !vendorSnapshot?.exists) throw new Error("VENDOR_NOT_FOUND");
+        if (vendorSnapshot?.data()?.deleting === true) throw new Error("VENDOR_DELETING");
+        transaction.update(recordRef, {
+          vendorId: update.vendorId || FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
         });
       });
       return Response.json({ success: true });
@@ -369,6 +406,8 @@ export async function PATCH(request: Request) {
     if (message === "PAYMENT_EXCEEDS_BALANCE") return responseError("Payment cannot exceed the remaining balance.", 400);
     if (message === "HANDOVER_DETAILS_REQUIRED") return responseError("A ready job and delivery person are required before handover.", 400);
     if (message === "JOB_ALREADY_RETURNED") return responseError("This service job has already been returned.", 409);
+    if (message === "VENDOR_NOT_FOUND") return responseError("The selected service vendor could not be found.", 400);
+    if (message === "VENDOR_DELETING") return responseError("This service vendor is being deleted. Select another vendor.", 409);
     console.error("Trusted record update failed.", error);
     return responseError("The record could not be updated. Check Firebase Admin setup and try again.", 500);
   }

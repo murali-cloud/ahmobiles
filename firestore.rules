@@ -71,6 +71,11 @@ service cloud.firestore {
         allow delete: if false;
       }
 
+      match /vendors/{vendorId} {
+        allow read: if canReadModule(shopId, 'services');
+        allow write: if false;
+      }
+
       match /sales/{saleId} {
         allow read: if canReadModule(shopId, 'sales');
         allow write: if false;

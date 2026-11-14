@@ -1,10 +1,10 @@
 "use client";
 
 import {
-  Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Bell,
+  Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3,
   Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ClipboardList,
-  Clock3, CreditCard, Download, Eye, EyeOff, FileText, Filter, LayoutDashboard, LogOut, Menu, MoreHorizontal,
-  Pencil, Plus, Printer, Search, Settings, ShieldCheck, Smartphone, Users, Wrench, X, Zap,
+  Clock3, CreditCard, Download, Eye, EyeOff, FileText, Filter, LayoutDashboard, LogOut, Menu, MoreHorizontal, Store,
+  Pencil, Plus, Printer, Search, Settings, ShieldCheck, Smartphone, Trash2, Users, Wrench, X, Zap,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -14,35 +14,38 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { jsPDF } from "jspdf";
 import {
-  addPayment, changeOwnPassword, changeServiceStatus, createEmployee, createNumberedRecord, firebaseConfigured,
-  listEmployees, loadWorkspaceIdentity, logOut, observeAuth, observeWorkspace, removeEmployee,
+  addPayment, changeOwnPassword, changeServiceStatus, changeServiceVendor, createEmployee, createNumberedRecord, createVendorService, deleteServiceVendor as deleteServiceVendorCloud, firebaseConfigured,
+  createServiceVendor, listEmployees, listServiceVendors, listVendorServices, loadWorkspaceIdentity, logOut, observeAuth, observeWorkspace, removeEmployee, updateVendorService as updateVendorServiceCloud,
   signIn, updateEmployee, writeRecord, writeSettings,
 } from "./lib/firebase";
 import {
-  makeCustomer, nextInvoiceNumber, patchSettings, readLocalWorkspace,
-  updateLocalRecord, writeLocalWorkspace,
+  makeCustomer, nextInvoiceNumber, nextVendorServiceNumber, patchSettings, readLocalWorkspace,
+  updateLocalRecord, updateLocalVendor, updateLocalVendorService, writeLocalWorkspace,
 } from "./lib/local-data";
 import { normalizePhoneNumber } from "./lib/phone";
 import {
   DEFAULT_SETTINGS, EMPLOYEE_MODULES, NO_EMPLOYEE_PERMISSIONS, type Customer, type EmployeeAccount,
   type EmployeeModule, type EmployeePermissions, type ModuleAccess, type Payment, type PaymentStatus,
-  type ProductLine, type Sale, type ServiceJob, type ServiceStatus, type ShopSettings, type WorkspaceData, type WorkspaceIdentity,
+  type ProductLine, type Sale, type ServiceJob, type ServiceStatus, type ServiceVendor, type VendorService, type ShopSettings, type WorkspaceData, type WorkspaceIdentity,
 } from "./lib/types";
-import { customerSchema, loginSchema, saleSchema, serviceFormSchema, serviceSchema } from "./lib/validation";
+import { customerSchema, loginSchema, saleSchema, serviceFormSchema, serviceSchema, serviceVendorSchema, vendorServiceFormSchema } from "./lib/validation";
 
 const NAV = [
   { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
   { label: "Sales", href: "/sales", icon: CreditCard },
   { label: "Services", href: "/services", icon: Wrench },
   { label: "Ready for delivery", href: "/services/ready", icon: CheckCircle2 },
+  { label: "Service vendors", href: "/vendors", icon: Store },
   { label: "Customers", href: "/customers", icon: Users },
   { label: "Reports", href: "/reports", icon: BarChart3 },
 ];
 const CONDITIONS = ["Good condition", "Display damaged", "Body damaged", "Back panel damaged", "Screen cracked", "Power issue", "Other"];
 const EMPTY_DATA: WorkspaceData = {
-  sales: [], services: [], customers: [], settings: DEFAULT_SETTINGS,
+  sales: [], services: [], customers: [], vendors: [], vendorServices: [], settings: DEFAULT_SETTINGS,
 };
 type ChartPeriod = "Week" | "Month" | "Year" | "Custom";
+type RevenuePeriod = "Today" | "This week" | "This month" | "This year" | "All time";
+const REVENUE_PERIODS: RevenuePeriod[] = ["Today", "This week", "This month", "This year", "All time"];
 
 function money(value: number): string {
   return new Intl.NumberFormat("en-IN", {
@@ -60,6 +63,26 @@ function dateInputValue(date = new Date()): string {
   }).formatToParts(date);
   const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
   return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function dateKey(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : dateInputValue(date);
+}
+
+function isInRevenuePeriod(value: string, period: RevenuePeriod): boolean {
+  if (period === "All time") return true;
+  const key = dateKey(value);
+  if (!key) return false;
+  const today = dateInputValue();
+  if (key > today) return false;
+  if (period === "Today") return key === today;
+  if (period === "This month") return key.slice(0, 7) === today.slice(0, 7);
+  if (period === "This year") return key.slice(0, 4) === today.slice(0, 4);
+
+  const weekStart = new Date(`${today}T00:00:00Z`);
+  weekStart.setUTCDate(weekStart.getUTCDate() - ((weekStart.getUTCDay() + 6) % 7));
+  return key >= weekStart.toISOString().slice(0, 10);
 }
 
 function businessYear(date = new Date()): number {
@@ -106,6 +129,7 @@ export default function Workspace() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState("");
   const [period, setPeriod] = useState<ChartPeriod>("Week");
+  const [revenuePeriod, setRevenuePeriod] = useState<RevenuePeriod>("This month");
   const [chartFrom, setChartFrom] = useState("");
   const [chartTo, setChartTo] = useState("");
   const [modal, setModal] = useState<ReactNode>(null);
@@ -197,11 +221,13 @@ export default function Workspace() {
           for (const id of incomingIds) pending.delete(id);
           return [...pending.values(), ...incoming.filter((record) => !pending.has(record.id))];
         };
-        setData({
+        setData((current) => ({
           ...workspace,
           sales: mergePending(workspace.sales, pendingCloudRecords.current.sales),
           services: mergePending(workspace.services, pendingCloudRecords.current.services),
-        });
+          vendors: current.vendors,
+          vendorServices: current.vendorServices,
+        }));
         setLoading(false);
         setReady(true);
       }, (streamError) => {
@@ -216,6 +242,30 @@ export default function Workspace() {
         setReady(true);
       });
     }
+  }, [user]);
+
+  useEffect(() => {
+    if (!firebaseConfigured || !user) return;
+    const canReadVendorData = user.role === "admin"
+      || user.permissions.vendors !== "none"
+      || user.permissions.services !== "none"
+      || user.permissions.ready !== "none"
+      || user.permissions.overview !== "none"
+      || user.permissions.reports !== "none";
+    if (!canReadVendorData) {
+      setData((current) => ({ ...current, vendors: [], vendorServices: [] }));
+      return;
+    }
+    let active = true;
+    setData((current) => ({ ...current, vendors: [], vendorServices: [] }));
+    Promise.all([listServiceVendors(), listVendorServices()])
+      .then(([vendors, vendorServices]) => {
+        if (active) setData((current) => ({ ...current, vendors, vendorServices }));
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : "Could not load service vendors.");
+      });
+    return () => { active = false; };
   }, [user]);
 
   const persist = useCallback(async (nextData: WorkspaceData) => {
@@ -262,6 +312,9 @@ export default function Workspace() {
   }, [data, persist, saveCustomer, user]);
 
   const saveService = useCallback(async (draft: Omit<ServiceJob, "id" | "serviceNumber"> & { serviceNumber?: string }): Promise<ServiceJob> => {
+    if (draft.vendorId && !data.vendors.some((vendor) => vendor.id === draft.vendorId)) {
+      throw new Error("The selected service vendor could not be found.");
+    }
     const customer = await saveCustomer(draft.customerName, draft.contactNumber);
     if (firebaseConfigured && user) {
       const created = await createNumberedRecord(user.shopId, "services", data.settings.servicePrefix || "SRV", {
@@ -301,6 +354,8 @@ export default function Workspace() {
         if (!payment) throw new Error("The payment details are incomplete.");
         const newPayment = { amount: payment.amount, date: payment.date, notes: payment.notes };
         await addPayment(user.shopId, "services", service.id, newPayment);
+      } else if (service.vendorId !== current.vendorId) {
+        await changeServiceVendor(user.shopId, service.id, service.vendorId);
       } else if (service.status !== current.status) {
         await changeServiceStatus(user.shopId, service.id, service.status, {
           readyAt: service.readyAt,
@@ -314,10 +369,131 @@ export default function Workspace() {
     } else await persist(updateLocalRecord(data, "services", service.id, service));
   }, [data, persist, user]);
 
+  const assignServiceVendor = useCallback((service: ServiceJob, vendorId?: string) => {
+    void updateService({ ...service, vendorId })
+      .then(() => notify("Service vendor updated."))
+      .catch(notifyFromError);
+  }, [notify, notifyFromError, updateService]);
+
   const saveShopSettings = useCallback(async (settings: ShopSettings) => {
     if (firebaseConfigured && user) await writeSettings(user.shopId, settings);
     else await persist(patchSettings(data, settings));
   }, [data, persist, user]);
+
+  const saveServiceVendor = useCallback(async (name: string, phone: string): Promise<ServiceVendor> => {
+    const normalizedPhone = normalizePhoneNumber(phone);
+    if (data.vendors.some((vendor) => normalizePhoneNumber(vendor.phone) === normalizedPhone)) {
+      throw new Error("A service vendor with this mobile number already exists.");
+    }
+    const vendor = firebaseConfigured && user
+      ? await createServiceVendor(name.trim(), phone.trim())
+      : { id: newId(), name: name.trim(), phone: phone.trim(), createdAt: new Date().toISOString() };
+    if (firebaseConfigured && user) {
+      setData((current) => ({ ...current, vendors: [vendor, ...current.vendors.filter((item) => item.id !== vendor.id)] }));
+    } else {
+      await persist(updateLocalVendor(data, vendor));
+    }
+    return vendor;
+  }, [data, persist, user]);
+
+  const deleteServiceVendor = useCallback((vendor: ServiceVendor) => {
+    const linkedEntries = data.vendorServices.filter((service) => service.vendorId === vendor.id).length;
+    const linkedJobs = data.services.filter((service) => service.vendorId === vendor.id).length;
+    setModal(<VendorDeleteModal
+      vendor={vendor}
+      linkedEntries={linkedEntries}
+      linkedJobs={linkedJobs}
+      onCancel={() => setModal(null)}
+      onConfirm={async () => {
+        if (firebaseConfigured && user) {
+          await deleteServiceVendorCloud(vendor.id);
+          setData((current) => ({
+            ...current,
+            vendors: current.vendors.filter((item) => item.id !== vendor.id),
+            vendorServices: current.vendorServices.filter((item) => item.vendorId !== vendor.id),
+            services: current.services.map((service) => service.vendorId === vendor.id
+              ? { ...service, vendorId: undefined }
+              : service),
+          }));
+        } else {
+          await persist({
+            ...data,
+            vendors: data.vendors.filter((item) => item.id !== vendor.id),
+            vendorServices: data.vendorServices.filter((item) => item.vendorId !== vendor.id),
+            services: data.services.map((service) => service.vendorId === vendor.id
+              ? { ...service, vendorId: undefined }
+              : service),
+          });
+        }
+        setModal(null);
+        router.push("/vendors");
+        notify(`${vendor.name} and its vendor service entries were deleted.`);
+      }}
+    />);
+  }, [data, notify, persist, router, user]);
+
+  const saveVendorService = useCallback(async (
+    draft: Omit<VendorService, "id" | "createdAt">,
+  ): Promise<VendorService> => {
+    if (!data.vendors.some((vendor) => vendor.id === draft.vendorId)) {
+      throw new Error("The selected service vendor could not be found. Reload the vendor list and try again.");
+    }
+    if (data.vendorServices.some((service) =>
+      service.vendorId === draft.vendorId && service.serviceNumber === draft.serviceNumber.trim())) {
+      throw new Error("That service bill number is already in use for this vendor.");
+    }
+    const service = firebaseConfigured && user
+      ? await createVendorService(draft)
+      : { ...draft, id: newId(), createdAt: new Date().toISOString() };
+    if (firebaseConfigured && user) {
+      setData((current) => ({ ...current, vendorServices: [service, ...current.vendorServices] }));
+    } else {
+      await persist(updateLocalVendorService(data, service));
+    }
+    return service;
+  }, [data, persist, user]);
+
+  const updateVendorServiceRecord = useCallback(async (
+    service: VendorService,
+    changes: Partial<Pick<VendorService, "status" | "deliveryDate" | "deliveryCustomer">>,
+  ) => {
+    if (firebaseConfigured && user) {
+      await updateVendorServiceCloud(service.id, changes);
+      setData((current) => ({
+        ...current,
+        vendorServices: current.vendorServices.map((item) => item.id === service.id ? { ...item, ...changes } : item),
+      }));
+    } else {
+      await persist(updateLocalVendorService(data, { ...service, ...changes }));
+    }
+  }, [data, persist, user]);
+
+  const editVendorServiceDelivery = (service: VendorService) => {
+    const vendor = data.vendors.find((item) => item.id === service.vendorId);
+    if (!vendor) {
+      notify("The service vendor could not be found. Reload and try again.", "error");
+      return;
+    }
+    setModal(<VendorServiceDeliveryModal
+      service={service}
+      vendor={vendor}
+      onClose={() => setModal(null)}
+      onSave={async (delivery) => {
+        await updateVendorServiceRecord(service, delivery);
+        setModal(null);
+        notify("Vendor service delivery details saved.");
+      }}
+    />);
+  };
+
+  const changeVendorServiceStatus = useCallback((service: VendorService, status: ServiceStatus) => {
+    const deliveryDate = status === "Returned" && !service.deliveryDate
+      ? businessDateTime(dateInputValue())
+      : service.deliveryDate;
+    void updateVendorServiceRecord(service, { status, ...(deliveryDate ? { deliveryDate } : {}) })
+      .then(() => notify("Vendor service status updated."))
+      .catch(notifyFromError);
+  }, [notify, notifyFromError, updateVendorServiceRecord]);
 
   const setServiceStatus = useCallback((service: ServiceJob, status: ServiceStatus) => {
     const current = data.services.find((item) => item.id === service.id) ?? service;
@@ -392,6 +568,7 @@ export default function Workspace() {
   const routeId = segments[2] ?? (subroute && !["create", "ready"].includes(subroute) ? subroute : "");
   const activeHref = route === "dashboard" ? "/dashboard"
     : route === "sales" ? "/sales"
+    : route === "vendors" ? "/vendors"
     : route === "services" && subroute === "ready" ? "/services/ready"
     : route === "services" ? "/services"
     : `/${route}`;
@@ -403,6 +580,7 @@ export default function Workspace() {
     && canViewModule("ready");
   const routeModule: EmployeeModule | null = route === "dashboard" ? "overview"
     : route === "sales" ? "sales"
+    : route === "vendors" ? "vendors"
     : route === "services" && (subroute === "ready" || isReadyServiceDetail) ? "ready"
     : route === "services" ? "services"
     : route === "customers" ? "customers"
@@ -421,6 +599,7 @@ export default function Workspace() {
     : href === "/sales" ? canViewModule("sales") || canViewModule("reports")
     : href === "/services" ? canViewModule("services") || canViewModule("reports")
     : href === "/services/ready" ? canAccessReady
+    : href === "/vendors" ? canViewModule("vendors")
     : href === "/customers" ? canViewModule("customers")
     : canViewModule("reports"));
 
@@ -492,6 +671,30 @@ export default function Workspace() {
     />);
   };
 
+  const addServiceVendorDialog = () => {
+    setModal(<ServiceVendorModal
+      onClose={() => setModal(null)}
+      onSave={async (name, phone) => {
+        const vendor = await saveServiceVendor(name, phone);
+        setModal(null);
+        notify(`${vendor.name} added as a service vendor.`);
+      }}
+    />);
+  };
+
+  const addVendorServiceDialog = (vendor: ServiceVendor) => {
+    setModal(<VendorServiceModal
+      vendor={vendor}
+      initialServiceNumber={nextVendorServiceNumber(vendor.id, data.vendorServices)}
+      onClose={() => setModal(null)}
+      onSave={async (service) => {
+        await saveVendorService({ ...service, vendorId: vendor.id });
+        setModal(null);
+        notify(`${service.serviceNumber} added for ${vendor.name}.`);
+      }}
+    />);
+  };
+
   const view = route === "sales" && subroute === "create"
     ? <SaleForm
         data={data}
@@ -524,6 +727,7 @@ export default function Workspace() {
     ? <ServiceForm
         customers={data.customers}
         services={data.services}
+        vendors={data.vendors}
         settings={data.settings}
         busy={busy}
         onSubmit={async (draft) => {
@@ -548,6 +752,7 @@ export default function Workspace() {
       />
     : route === "services" && routeId
     ? <ServiceDetail service={data.services.find((item) => item.id === routeId || item.serviceNumber === routeId)}
+        vendor={data.vendors.find((item) => item.id === data.services.find((service) => service.id === routeId || service.serviceNumber === routeId)?.vendorId)}
         onBack={() => router.push(canViewModule("services") || canViewModule("reports") ? "/services" : "/services/ready")}
         onPayment={(id) => openPayment("service", id)} settings={data.settings}
         onUpdate={(service) => setServiceStatus(service, service.status)} canEdit={canEditModule("services")} />
@@ -555,14 +760,31 @@ export default function Workspace() {
     ? <ServicesPage services={data.services} search={globalSearch} onSearch={setGlobalSearch}
         onCreate={() => router.push("/services/create")} onView={(id) => router.push(`/services/${id}`)}
         onPayment={(id) => openPayment("service", id)} onUpdate={(service) => setServiceStatus(service, service.status)}
-        canEdit={canEditModule("services")} />
+        onVendorChange={assignServiceVendor} canEdit={canEditModule("services")} vendors={data.vendors} />
+    : route === "vendors"
+    ? <ServiceVendorsPage
+        vendors={data.vendors}
+        vendorServices={data.vendorServices}
+        search={globalSearch}
+        onSearch={setGlobalSearch}
+        selectedId={routeId === "create" ? subroute : routeId}
+        onSelect={(id) => router.push(id ? `/vendors/${id}` : "/vendors")}
+        onCreateService={addVendorServiceDialog}
+        onEditService={editVendorServiceDelivery}
+        onStatusChange={changeVendorServiceStatus}
+        onDeleteVendor={deleteServiceVendor}
+        onAdd={addServiceVendorDialog}
+        canEdit={canEditModule("vendors")}
+      />
     : route === "customers"
     ? <CustomersPage customers={data.customers} sales={data.sales} services={data.services}
         search={globalSearch} onSearch={setGlobalSearch} onAdd={addCustomerDialog}
         selectedId={routeId} onView={(id) => router.push(id ? `/customers/${id}` : "/customers")}
         onEdit={editCustomerDialog} />
     : route === "reports"
-    ? <ReportsPage sales={data.sales} services={data.services} />
+    ? <ReportsPage data={data} revenuePeriod={revenuePeriod} setRevenuePeriod={setRevenuePeriod}
+        canViewSales={canViewModule("sales") || canViewModule("reports")}
+        canViewServices={canViewModule("services") || canViewModule("reports")} />
     : route === "settings"
     ? <SettingsPage settings={data.settings} identity={user} canEdit={canEditModule("settings")} onSave={async (settings) => {
         try { await saveShopSettings(settings); notify("Settings saved."); }
@@ -571,7 +793,7 @@ export default function Workspace() {
         try { await changeOwnPassword(currentPassword, newPassword); notify("Password changed."); }
         catch (reason) { notifyFromError(reason); throw reason; }
       }} />
-    : <Dashboard data={data} period={period} setPeriod={setPeriod} chartFrom={chartFrom} setChartFrom={setChartFrom} chartTo={chartTo} setChartTo={setChartTo}
+    : <Dashboard data={data} period={period} setPeriod={setPeriod} revenuePeriod={revenuePeriod} setRevenuePeriod={setRevenuePeriod} chartFrom={chartFrom} setChartFrom={setChartFrom} chartTo={chartTo} setChartTo={setChartTo}
         onCreateSale={() => router.push("/sales/create")}
         onCreateService={() => router.push("/services/create")}
         canCreateSale={canEditModule("sales")}
@@ -625,11 +847,6 @@ export default function Workspace() {
         <header className="topbar">
           <button className="icon-btn mobile-menu" aria-label="Open menu" onClick={() => setMenuOpen(true)}><Menu size={20} /></button>
           <div className="breadcrumb"><span>Workspace</span><ChevronRight size={14} /><strong>{title}</strong></div>
-          <div className="topbar-actions">
-            <label className="global-search"><Search size={16} /><input value={globalSearch} onChange={(event) => setGlobalSearch(event.target.value)} placeholder="Search anything..." /><kbd>⌘ K</kbd></label>
-            <button className="icon-btn notification-btn" aria-label="Notifications" onClick={() => notify("You're all caught up.")}><Bell size={18} /><i /></button>
-            <span className="topbar-avatar">{user?.email?.[0]?.toUpperCase() ?? "A"}</span>
-          </div>
         </header>
         {error && <div className="error-banner" role="alert"><Activity size={15} /><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss error"><X size={15} /></button></div>}
         <main className={`page-content ${route === "customers" && !canEditModule("customers") ? "customer-read-only" : ""}`}>
@@ -650,6 +867,8 @@ function routeTitle(route: string, subroute: string): string {
   if (route === "services" && subroute === "ready") return "Ready for delivery";
   if (route === "services" && subroute) return "Service details";
   if (route === "services") return "Services";
+  if (route === "vendors" && subroute) return "Vendor services";
+  if (route === "vendors") return "Service vendors";
   if (route === "customers") return subroute ? "Customer details" : "Customers";
   if (route === "reports") return "Reports";
   if (route === "settings") return "Settings";
@@ -710,8 +929,62 @@ function AccessDenied() {
   return <div className="panel"><EmptyState icon={ShieldCheck} title="Access not granted" detail="Ask your shop administrator to enable this module or permission." /></div>;
 }
 
-function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, setChartTo, onCreateSale, onCreateService, canCreateSale, canCreateService, canViewSales, canViewServices, canViewCustomers, canOpenSales, canOpenServices, canOpenReady, canOpenCustomers, onSeeSales, onSeeServices, onSeeReady, onCustomer }: {
+function RevenueAnalytics({ data, period, onPeriodChange, canViewSales = true, canViewServices = true }: {
+  data: WorkspaceData;
+  period: RevenuePeriod;
+  onPeriodChange: (period: RevenuePeriod) => void;
+  canViewSales?: boolean;
+  canViewServices?: boolean;
+}) {
+  const salesRevenue = canViewSales
+    ? data.sales.filter((sale) => isInRevenuePeriod(sale.invoiceDate, period)).reduce((sum, sale) => sum + sale.finalAmount, 0)
+    : 0;
+  const serviceRevenue = canViewServices
+    ? data.services.filter((service) => isInRevenuePeriod(service.inDate, period)).reduce((sum, service) => sum + service.serviceAmount - service.discount, 0)
+    : 0;
+  const vendorServiceRevenue = canViewServices
+    ? data.vendorServices.filter((service) => isInRevenuePeriod(service.inDate, period)).reduce((sum, service) => sum + service.serviceCharge, 0)
+    : 0;
+  const metrics = [
+    { label: "Overall revenue", value: salesRevenue + serviceRevenue + vendorServiceRevenue, icon: ArrowUpRight, accent: "blue" },
+    ...(canViewSales ? [{ label: "Sales revenue", value: salesRevenue, icon: CreditCard, accent: "violet" }] : []),
+    ...(canViewServices ? [
+      { label: "Service revenue", value: serviceRevenue, icon: Wrench, accent: "amber" },
+      { label: "Vendor service revenue", value: vendorServiceRevenue, icon: Store, accent: "green" },
+    ] : []),
+  ];
+  return <section className="panel revenue-analytics-panel">
+    <div className="panel-heading"><div><h2>Revenue analytics</h2><p>Revenue for the selected period</p></div><label className="select-wrap"><span>Period</span><select aria-label="Revenue analytics period" value={period} onChange={(event) => onPeriodChange(event.target.value as RevenuePeriod)}>{REVENUE_PERIODS.map((option) => <option key={option}>{option}</option>)}</select><ChevronDown size={14} /></label></div>
+    <div className="report-metrics">{metrics.map(({ label, value, icon: Icon, accent }) => <div className="panel report-metric" key={label}><span className={`metric-icon ${accent}`}><Icon size={17} /></span><span>{label}<strong>{money(value)}</strong><small>{period}</small></span></div>)}</div>
+  </section>;
+}
+
+function VendorAnalytics({ data, period, maxRows }: {
+  data: WorkspaceData;
+  period: RevenuePeriod;
+  maxRows?: number;
+}) {
+  const periodServices = data.vendorServices.filter((service) => isInRevenuePeriod(service.inDate, period));
+  const analytics = data.vendors.map((vendor) => {
+    const records = periodServices.filter((service) => service.vendorId === vendor.id);
+    return {
+      vendor,
+      count: records.length,
+      revenue: records.reduce((sum, service) => sum + service.serviceCharge, 0),
+    };
+  }).sort((a, b) => b.revenue - a.revenue || b.count - a.count || a.vendor.name.localeCompare(b.vendor.name));
+  const shown = maxRows ? analytics.slice(0, maxRows) : analytics;
+  return <section className="panel vendor-analytics-panel">
+    <div className="panel-heading"><div><h2>Service vendor analytics</h2><p>{periodServices.length} vendor service {periodServices.length === 1 ? "entry" : "entries"} · {period}</p></div></div>
+    {shown.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>VENDOR</th><th>SERVICE ENTRIES</th><th>VENDOR SERVICE REVENUE</th></tr></thead><tbody>{shown.map(({ vendor, count, revenue }) => <tr key={vendor.id}><td><strong>{vendor.name}</strong></td><td>{count}</td><td><strong>{money(revenue)}</strong></td></tr>)}</tbody></table></div>
+      : <EmptyState icon={Store} title="No service vendors yet" detail="Add a vendor and record vendor services to see vendor analytics." />}
+    {maxRows !== undefined && analytics.length > shown.length && <div className="vendor-analytics-foot">Showing top {shown.length} of {analytics.length} vendors by revenue.</div>}
+  </section>;
+}
+
+function Dashboard({ data, period, setPeriod, revenuePeriod, setRevenuePeriod, chartFrom, setChartFrom, chartTo, setChartTo, onCreateSale, onCreateService, canCreateSale, canCreateService, canViewSales, canViewServices, canViewCustomers, canOpenSales, canOpenServices, canOpenReady, canOpenCustomers, onSeeSales, onSeeServices, onSeeReady, onCustomer }: {
   data: WorkspaceData; period: ChartPeriod; setPeriod: (period: ChartPeriod) => void;
+  revenuePeriod: RevenuePeriod; setRevenuePeriod: (period: RevenuePeriod) => void;
   chartFrom: string; setChartFrom: (value: string) => void; chartTo: string; setChartTo: (value: string) => void;
   onCreateSale: () => void; onCreateService: () => void; canCreateSale: boolean; canCreateService: boolean;
   canViewSales: boolean; canViewServices: boolean; canViewCustomers: boolean;
@@ -719,21 +992,11 @@ function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, 
   onSeeSales: () => void; onSeeServices: () => void;
   onSeeReady: () => void; onCustomer: () => void;
 }) {
-  const today = new Date();
-  const todaySales = data.sales.filter((sale) => new Date(sale.invoiceDate).toDateString() === today.toDateString()).reduce((sum, sale) => sum + sale.finalAmount, 0);
-  const monthSales = data.sales.filter((sale) => {
-    const date = new Date(sale.invoiceDate);
-    return date.getMonth() === today.getMonth() && date.getFullYear() === today.getFullYear();
-  }).reduce((sum, sale) => sum + sale.finalAmount, 0);
-  const serviceRevenue = data.services.reduce((sum, service) => sum + service.serviceAmount - service.discount, 0);
   const pending = data.services.filter((service) => !["Ready", "Returned"].includes(service.status)).length;
   const readyJobs = data.services.filter((service) => service.status === "Ready");
   const outstanding = data.sales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0)
     + data.services.reduce((sum, service) => sum + Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)), 0);
   const metrics = [
-    { label: "Sales today", value: money(todaySales), icon: CreditCard, accent: "blue", note: "Today's retail sales" },
-    { label: "Sales this month", value: money(monthSales), icon: BarChart3, accent: "violet", note: "Retail revenue" },
-    { label: "Service revenue", value: money(serviceRevenue), icon: Wrench, accent: "amber", note: "All service jobs" },
     { label: "Total service jobs", value: String(data.services.length), icon: ClipboardList, accent: "violet", note: "All-time service jobs" },
     { label: "Pending service jobs", value: String(pending), icon: Clock3, accent: "amber", note: "Received or in progress" },
     { label: "Ready for delivery", value: String(readyJobs.length), icon: CheckCircle2, accent: "green", note: "Awaiting customer pickup" },
@@ -741,9 +1004,8 @@ function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, 
     { label: "Outstanding", value: money(outstanding), icon: ArrowUpRight, accent: "rose", note: "Across sales & services" },
   ];
   const visibleMetrics = metrics.filter(({ label }) => {
-    if (label === "Sales today" || label === "Sales this month") return canViewSales;
     if (label === "Total customers") return canViewCustomers;
-    if (["Service revenue", "Total service jobs", "Pending service jobs", "Ready for delivery"].includes(label)) return canViewServices;
+    if (["Total service jobs", "Pending service jobs", "Ready for delivery"].includes(label)) return canViewServices;
     return canViewSales || canViewServices;
   });
   const chartData = useMemo(() => period === "Custom"
@@ -754,22 +1016,23 @@ function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, 
       <PageHeader eyebrow={new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", weekday: "long", day: "numeric", month: "long" }).toUpperCase()} title="Good morning, welcome back" description="Here’s how things are looking at your shop today.">
         {canCreateService && <Button variant="secondary" onClick={onCreateService}><Wrench size={16} /> New service</Button>}{canCreateSale && <Button onClick={onCreateSale}><Plus size={17} /> Create a sale</Button>}
       </PageHeader>
+      {(canViewSales || canViewServices) && <RevenueAnalytics data={data} period={revenuePeriod} onPeriodChange={setRevenuePeriod} canViewSales={canViewSales} canViewServices={canViewServices} />}
       <div className="metrics-grid">{visibleMetrics.map(({ label, value, icon: Icon, accent, note }) =>
         <div className="metric-card" key={label}><div className="metric-top"><span>{label}</span><span className={`metric-icon ${accent}`}><Icon size={17} /></span></div><strong>{value}</strong><div className="metric-note"><span>{note}</span></div></div>)}</div>
       <div className="dashboard-grid">
         {(canViewSales || canViewServices) && <section className="panel revenue-panel">
-          <div className="panel-heading"><div><h2>Revenue overview</h2><p>{canViewSales && canViewServices ? "Sales and service income over time" : canViewSales ? "Sales revenue over time" : "Service income over time"}</p></div><div className="segmented">{(["Week", "Month", "Year", "Custom"] as const).map((item) => <button key={item} className={period === item ? "selected" : ""} onClick={() => setPeriod(item)}>{item}</button>)}</div></div>
+          <div className="panel-heading"><div><h2>Revenue overview</h2><p>{canViewSales && canViewServices ? "Sales, service, and vendor service income over time" : canViewSales ? "Sales revenue over time" : "Service and vendor service income over time"}</p></div><div className="segmented">{(["Week", "Month", "Year", "Custom"] as const).map((item) => <button key={item} className={period === item ? "selected" : ""} onClick={() => setPeriod(item)}>{item}</button>)}</div></div>
           {period === "Custom" && <div className="date-range dashboard-date-range"><label>From<input className="input" type="date" value={chartFrom} onChange={(event) => setChartFrom(event.target.value)} /></label><ArrowRight size={15} /><label>To<input className="input" type="date" value={chartTo} onChange={(event) => setChartTo(event.target.value)} /></label><button className="text-link" onClick={() => { setChartFrom(""); setChartTo(""); }}>Clear</button></div>}
-          {data.sales.length + data.services.length === 0
+          {data.sales.length + data.services.length + data.vendorServices.length === 0
             ? <div className="chart-empty"><div className="chart-empty-art"><AreaChartIcon /></div><strong>Your revenue story starts here</strong><span>Sales and services will appear as you add your first bill.</span>{canCreateSale && <Button variant="secondary" onClick={onCreateSale}><Plus size={15} /> Add first sale</Button>}</div>
             : period === "Custom" && (!chartFrom || !chartTo || chartFrom > chartTo)
               ? <div className="chart-empty"><strong>Choose a valid date range</strong><span>Select both dates to see revenue for that period.</span></div>
               : <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData} margin={{ top: 12, right: 9, left: -18, bottom: 0 }}>
-                <defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#4677f5" stopOpacity={0.17} /><stop offset="100%" stopColor="#4677f5" stopOpacity={0} /></linearGradient><linearGradient id="servicesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#27b69d" stopOpacity={0.16} /><stop offset="100%" stopColor="#27b69d" stopOpacity={0} /></linearGradient></defs>
+                <defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#4677f5" stopOpacity={0.17} /><stop offset="100%" stopColor="#4677f5" stopOpacity={0} /></linearGradient><linearGradient id="servicesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#27b69d" stopOpacity={0.16} /><stop offset="100%" stopColor="#27b69d" stopOpacity={0} /></linearGradient><linearGradient id="vendorServicesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8c71e8" stopOpacity={0.16} /><stop offset="100%" stopColor="#8c71e8" stopOpacity={0} /></linearGradient></defs>
                 <CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} dy={8} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} tickFormatter={(value: number) => value === 0 ? "₹0" : `₹${value / 1000}k`} /><Tooltip formatter={(value) => money(Number(value))} contentStyle={{ border: "1px solid #e8ebf1", borderRadius: 10, fontSize: 14 }} />
-                {canViewSales && <Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" strokeWidth={2.3} fill="url(#salesFill)" activeDot={{ r: 4 }} />}{canViewServices && <Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" strokeWidth={2.3} fill="url(#servicesFill)" activeDot={{ r: 4 }} />}
+                {canViewSales && <Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" strokeWidth={2.3} fill="url(#salesFill)" activeDot={{ r: 4 }} />}{canViewServices && <Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" strokeWidth={2.3} fill="url(#servicesFill)" activeDot={{ r: 4 }} />}{canViewServices && <Area type="monotone" dataKey="vendorServices" name="Vendor services" stroke="#8c71e8" strokeWidth={2.3} fill="url(#vendorServicesFill)" activeDot={{ r: 4 }} />}
               </AreaChart></ResponsiveContainer></div>}
-          <div className="chart-legend">{canViewSales && <span><i className="legend-dot blue-dot" />Sales</span>}{canViewServices && <span><i className="legend-dot green-dot" />Services</span>}</div>
+          <div className="chart-legend">{canViewSales && <span><i className="legend-dot blue-dot" />Sales</span>}{canViewServices && <span><i className="legend-dot green-dot" />Services</span>}{canViewServices && <span><i className="legend-dot violet-dot" />Vendor services</span>}</div>
         </section>}
         {canViewServices && <section className="panel service-overview">
           <div className="panel-heading"><div><h2>Service desk</h2><p>Repair jobs at a glance</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>View all <ArrowRight size={14} /></button>}</div>
@@ -790,6 +1053,7 @@ function Dashboard({ data, period, setPeriod, chartFrom, setChartFrom, chartTo, 
             <div className="pickup-list">{readyJobs.slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Smartphone size={17} /></span><span className="pickup-info"><strong>{job.customerName}</strong><span>{job.brand} {job.mobileModel} · {job.serviceNumber}</span></span><span className="pickup-balance">{money(Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments)))}</span></div>)}</div>}
         </section>}
         {canViewServices && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button>}</div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{job.brand} {job.mobileModel} · {dateLabel(job.inDate)}</span></span><StatusBadge status={job.status} /></div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={canCreateService ? <Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button> : undefined} />}</section>}
+        {canViewServices && <VendorAnalytics data={data} period={revenuePeriod} maxRows={5} />}
         {canViewCustomers && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recently added customers</h2><p>Your newest customer records</p></div>{canOpenCustomers && <button className="text-link" onClick={onCustomer}>View directory <ArrowRight size={14} /></button>}</div>{data.customers.length ? <div className="pickup-list">{data.customers.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((customer) => <div className="pickup-item" key={customer.id}><span className="mini-avatar">{customer.name[0]?.toUpperCase() ?? "?"}</span><span className="pickup-info"><strong>{customer.name}</strong><span>{customer.phone} · Added {dateLabel(customer.createdAt)}</span></span><Users size={15} className="customer-row-icon" /></div>)}</div> : <EmptyState icon={Users} title="Your directory is ready" detail="Customers added to a bill will show up here." action={canOpenCustomers ? <Button variant="secondary" onClick={onCustomer}><Users size={14} /> View customers</Button> : undefined} />}</section>}
       </div>
       <div className="dashboard-bottom-note"><span><ShieldCheck size={15} /> Your business data stays private to your workspace.</span>{canOpenCustomers && <button className="text-link" onClick={onCustomer}>Manage customers <ArrowRight size={13} /></button>}</div>
@@ -821,9 +1085,15 @@ function chartForPeriod(data: WorkspaceData, period: "Week" | "Month" | "Year") 
         : period === "Month" ? d.getMonth() === date.getMonth() && d.getFullYear() === date.getFullYear()
         : d.getFullYear() === date.getFullYear();
     }).reduce((sum, item) => sum + item.serviceAmount - item.discount, 0);
+    const vendorServices = data.vendorServices.filter((item) => {
+      const d = new Date(item.inDate);
+      return period === "Week" ? d.toDateString() === date.toDateString()
+        : period === "Month" ? d.getMonth() === date.getMonth() && d.getFullYear() === date.getFullYear()
+        : d.getFullYear() === date.getFullYear();
+    }).reduce((sum, item) => sum + item.serviceCharge, 0);
     return { label: period === "Week" ? date.toLocaleDateString("en-IN", { weekday: "short" })
       : period === "Month" ? date.toLocaleDateString("en-IN", { month: "short" })
-      : date.toLocaleDateString("en-IN", { month: "short" }), sales, services };
+      : date.toLocaleDateString("en-IN", { month: "short" }), sales, services, vendorServices };
   });
 }
 
@@ -840,12 +1110,12 @@ function chartForCustomRange(data: WorkspaceData, from: string, to: string) {
     if (granularity === "month") return `${year}-${month}`;
     return `${year}-${month}-${String(date.getDate()).padStart(2, "0")}`;
   };
-  const totals = new Map<string, { sales: number; services: number }>();
+  const totals = new Map<string, { sales: number; services: number; vendorServices: number }>();
   const cursor = new Date(start);
   if (granularity === "month") cursor.setDate(1);
   if (granularity === "year") { cursor.setMonth(0, 1); }
   while (cursor <= end) {
-    totals.set(keyForDate(cursor), { sales: 0, services: 0 });
+    totals.set(keyForDate(cursor), { sales: 0, services: 0, vendorServices: 0 });
     if (granularity === "day") cursor.setDate(cursor.getDate() + 1);
     else if (granularity === "month") cursor.setMonth(cursor.getMonth() + 1);
     else cursor.setFullYear(cursor.getFullYear() + 1);
@@ -861,6 +1131,12 @@ function chartForCustomRange(data: WorkspaceData, from: string, to: string) {
     if (date < from || date > to) continue;
     const bucket = totals.get(keyForDate(new Date(`${date}T00:00:00`)));
     if (bucket) bucket.services += service.serviceAmount - service.discount;
+  }
+  for (const service of data.vendorServices) {
+    const date = service.inDate.slice(0, 10);
+    if (date < from || date > to) continue;
+    const bucket = totals.get(keyForDate(new Date(`${date}T00:00:00`)));
+    if (bucket) bucket.vendorServices += service.serviceCharge;
   }
   return [...totals].map(([key, amounts]) => ({
     label: granularity === "day"
@@ -1111,9 +1387,10 @@ function PasswordInput({ value, onChange, autoComplete, placeholder }: {
   );
 }
 
-function ServiceForm({ customers, services, settings, busy, onSubmit, onCancel }: {
+function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, onCancel }: {
   customers: Customer[];
   services: ServiceJob[];
+  vendors: ServiceVendor[];
   settings: ShopSettings;
   busy: boolean; onSubmit: (draft: Omit<ServiceJob, "id" | "serviceNumber"> & { serviceNumber?: string }) => Promise<ServiceJob | undefined>; onCancel: () => void;
 }) {
@@ -1122,6 +1399,7 @@ function ServiceForm({ customers, services, settings, busy, onSubmit, onCancel }
   const [serviceNumber, setServiceNumber] = useState(generatedServiceNumber);
   const [amount, setAmount] = useState(0);
   const [discount, setDiscount] = useState(0);
+  const [vendorId, setVendorId] = useState("");
   const [formError, setFormError] = useState("");
   const { register, handleSubmit, formState: { errors } } = useForm({
     resolver: zodResolver(serviceFormSchema),
@@ -1141,12 +1419,13 @@ function ServiceForm({ customers, services, settings, busy, onSubmit, onCancel }
       setFormError("That service bill number is already in use.");
       return;
     }
-    const parsed = serviceSchema.safeParse({ ...form, receivedConditions: conditions, serviceAmount: amount, discount });
+    const parsed = serviceSchema.safeParse({ ...form, vendorId: vendorId || undefined, receivedConditions: conditions, serviceAmount: amount, discount });
     if (!parsed.success) { setFormError(parsed.error.issues[0]?.message ?? "Check the form details."); return; }
     const customer = customers.find((item) =>
       normalizePhoneNumber(item.phone) === normalizePhoneNumber(form.contactNumber));
     const saved = await onSubmit({
       customerId: customer?.id ?? "", customerName: form.customerName.trim(), contactNumber: form.contactNumber.trim(),
+      vendorId: vendorId || undefined,
       inDate: businessDateTime(form.inDate), brand: form.brand.trim(), mobileModel: form.mobileModel.trim(),
       imei: form.imei.trim(), reportedFault: form.reportedFault.trim(), technicianNotes: form.technicianNotes.trim(),
       receivedConditions: conditions, remarks: form.remarks.trim(), status: "Received", serviceAmount: amount,
@@ -1161,16 +1440,18 @@ function ServiceForm({ customers, services, settings, busy, onSubmit, onCancel }
     <PageHeader eyebrow="SERVICE DESK · NEW JOB" title="New service job" description="Record the device condition and repair request at intake."><Button variant="secondary" onClick={onCancel}><ArrowLeft size={15} /> Back to services</Button></PageHeader>
     <form className="billing-layout" onSubmit={submit} noValidate><div className="billing-main">
       <section className="panel form-panel"><div className="form-section-head"><span className="step-number">01</span><div><h2>Customer & intake</h2><p>Contact details and when the device arrived.</p></div></div><div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} /></FormField><FormField label="In date"><input className="input" type="date" {...register("inDate")} /></FormField><FormField label="Service bill number"><input className="input" required maxLength={120} value={serviceNumber} onChange={(event) => setServiceNumber(event.target.value)} /><span className="field-hint">Auto-generated; edit if needed.</span></FormField></div></section>
-      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Device details</h2><p>Identify the device and document its condition.</p></div></div><div className="form-grid two-col"><FormField label="Brand"><input className="input" placeholder="Samsung" {...register("brand")} /></FormField><FormField label="Model"><input className="input" placeholder="Galaxy S24" {...register("mobileModel")} /></FormField><FormField label="IMEI (optional)"><input className="input" placeholder="15-digit IMEI" {...register("imei")} /></FormField><FormField label="Reported fault" error={errors.reportedFault?.message}><input className="input" required placeholder="Describe the issue" {...register("reportedFault")} /></FormField></div><div className="condition-label">Received condition <span>Select all that apply</span></div><div className="condition-list">{CONDITIONS.map((condition) => <label key={condition} className={`condition-chip ${conditions.includes(condition) ? "checked" : ""}`}><input type="checkbox" checked={conditions.includes(condition)} onChange={() => toggleCondition(condition)} /><span>{conditions.includes(condition) && <Check size={12} />}</span>{condition}</label>)}</div><div className="form-grid two-col textareas"><FormField label="Technician notes"><textarea className="input textarea" placeholder="Notes for the repair team" {...register("technicianNotes")} /></FormField><FormField label="Additional remarks"><textarea className="input textarea" placeholder="Any other details about intake" {...register("remarks")} /></FormField></div><div className="credential-notice"><ShieldCheck size={16} /><span><strong>Device passwords and patterns are not collected.</strong> Please never record unlock credentials here or on the printed receipt.</span></div></section>
+      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Device details</h2><p>Identify the device and document its condition.</p></div></div><div className="form-grid two-col"><FormField label="Brand"><input className="input" placeholder="Samsung" {...register("brand")} /></FormField><FormField label="Model"><input className="input" placeholder="Galaxy S24" {...register("mobileModel")} /></FormField><FormField label="IMEI (optional)"><input className="input" placeholder="15-digit IMEI" {...register("imei")} /></FormField><FormField label="Reported fault" error={errors.reportedFault?.message}><input className="input" required placeholder="Describe the issue" {...register("reportedFault")} /></FormField><FormField label="Service vendor"><select className="input" value={vendorId} onChange={(event) => setVendorId(event.target.value)}><option value="">No vendor assigned</option>{vendors.slice().sort((a, b) => a.name.localeCompare(b.name)).map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name} · {vendor.phone}</option>)}</select></FormField></div><div className="condition-label">Received condition <span>Select all that apply</span></div><div className="condition-list">{CONDITIONS.map((condition) => <label key={condition} className={`condition-chip ${conditions.includes(condition) ? "checked" : ""}`}><input type="checkbox" checked={conditions.includes(condition)} onChange={() => toggleCondition(condition)} /><span>{conditions.includes(condition) && <Check size={12} />}</span>{condition}</label>)}</div><div className="form-grid two-col textareas"><FormField label="Technician notes"><textarea className="input textarea" placeholder="Notes for the repair team" {...register("technicianNotes")} /></FormField><FormField label="Additional remarks"><textarea className="input textarea" placeholder="Any other details about intake" {...register("remarks")} /></FormField></div><div className="credential-notice"><ShieldCheck size={16} /><span><strong>Device passwords and patterns are not collected.</strong> Please never record unlock credentials here or on the printed receipt.</span></div></section>
       <section className="panel form-panel"><div className="form-section-head"><span className="step-number">03</span><div><h2>Service charge</h2><p>Enter the service charge and any discount.</p></div></div><div className="form-grid two-col"><FormField label="Service charge (₹)"><input className="input" type="number" min="0" value={amount || ""} placeholder="0" onChange={(event) => setAmount(Number(event.target.value))} /></FormField><FormField label="Discount (₹)"><input className="input" type="number" min="0" value={discount || ""} placeholder="0" onChange={(event) => setDiscount(Number(event.target.value))} /></FormField></div></section>
       {formError && <div className="form-alert">{formError}</div>}<div className="form-footer"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="secondary" onClick={() => void submitAndPrint()} disabled={busy}><Printer size={15} /> Save & print</Button><Button type="submit" disabled={busy}>{busy ? "Saving…" : <><Check size={16} /> Save service job</>}</Button></div>
     </div><aside className="billing-side"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service estimate</strong><small>Update as work progresses</small></span></div><div className="total-lines"><span>Service charge <strong>{money(amount)}</strong></span><span>Discount <strong>− {money(discount)}</strong></span><div className="total-final"><span>Amount due</span><strong>{money(final)}</strong></div></div><div className="balance-box"><span>Balance</span><strong>{money(final)}</strong></div></div><div className="billing-tip"><Clock3 size={16} /><span>Service status starts as Received. Move it to Ready when repairs are complete.</span></div></aside></form>
   </>;
 }
 
-function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment, onUpdate, canEdit }: {
+function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, onPayment, onUpdate, onVendorChange, canEdit }: {
   services: ServiceJob[]; search: string; onSearch: (value: string) => void; onCreate: () => void;
+  vendors: ServiceVendor[];
   onView: (id: string) => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; canEdit: boolean;
+  onVendorChange: (service: ServiceJob, vendorId?: string) => void;
 }) {
   const router = useRouter();
   const [statusFilter, setStatusFilter] = useState("All statuses");
@@ -1179,7 +1460,8 @@ function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment,
   const [to, setTo] = useState("");
   const [sortBy, setSortBy] = useState("date-desc");
   const [page, setPage] = useState(1);
-  const filtered = services.filter((service) => (!search || `${service.serviceNumber} ${service.customerName} ${service.contactNumber} ${service.brand} ${service.mobileModel} ${service.imei}`.toLowerCase().includes(search.toLowerCase()))
+  const vendorNames = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
+  const filtered = services.filter((service) => (!search || `${service.serviceNumber} ${service.customerName} ${service.contactNumber} ${service.brand} ${service.mobileModel} ${service.imei} ${vendorNames.get(service.vendorId ?? "") ?? ""}`.toLowerCase().includes(search.toLowerCase()))
     && (statusFilter === "All statuses" || service.status === statusFilter)
     && (paymentFilter === "All payments" || statusOf(service.finalAmount, paymentTotal(service.payments)) === paymentFilter)
     && (!from || service.inDate.slice(0, 10) >= from)
@@ -1200,15 +1482,16 @@ function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment,
     const pageHeight = pdf.internal.pageSize.getHeight();
     const margin = 10;
     const columns = [
-      { title: "SERVICE BILL NO.", width: 28 },
-      { title: "IN DATE", width: 22 },
-      { title: "IN CUSTOMER NAME", width: 34 },
-      { title: "MOBILE WITH MODEL", width: 37 },
-      { title: "CUSTOMER NUMBER", width: 28 },
-      { title: "STATUS", width: 23 },
-      { title: "DELIVERY DATE", width: 23 },
-      { title: "DELIVERY CUSTOMER", width: 36 },
-      { title: "SERVICE CHARGE", width: 28 },
+      { title: "SERVICE BILL NO.", width: 25 },
+      { title: "IN DATE", width: 19 },
+      { title: "IN CUSTOMER NAME", width: 28 },
+      { title: "MOBILE WITH MODEL", width: 32 },
+      { title: "CUSTOMER NUMBER", width: 25 },
+      { title: "VENDOR", width: 25 },
+      { title: "STATUS", width: 20 },
+      { title: "DELIVERY DATE", width: 21 },
+      { title: "DELIVERY CUSTOMER", width: 31 },
+      { title: "SERVICE CHARGE", width: 23 },
     ];
     const orderedServices = filtered;
     const serviceTotal = orderedServices.reduce((sum, service) => sum + service.serviceAmount, 0);
@@ -1241,6 +1524,7 @@ function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment,
         service.customerName,
         `${service.brand} ${service.mobileModel}`.trim(),
         service.contactNumber,
+        vendorNames.get(service.vendorId ?? "") || "—",
         service.status,
         service.deliveryOutDate ? dateLabel(service.deliveryOutDate) : "—",
         service.deliveryOutPerson || "—",
@@ -1273,13 +1557,26 @@ function ServicesPage({ services, search, onSearch, onCreate, onView, onPayment,
     <PageHeader eyebrow="REPAIR & CARE" title="Service desk" description="Track every repair from intake to handover."><Button variant="secondary" onClick={exportServicesPdf}><Download size={15} /> Export PDF</Button><Button variant="secondary" onClick={() => router.push("/services/ready")}><CheckCircle2 size={15} /> Ready for pickup</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> New service job</Button>}</PageHeader>
     <div className="service-kpis">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <div className="service-kpi" key={status}><span className={`status-dot ${statusClass(status)}`} /><span>{status}</span><strong>{services.filter((item) => item.status === status).length}</strong></div>)}</div>
     <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search bill, customer, model or IMEI…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label><label className="select-wrap"><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All payments</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option></select><ChevronDown size={14} /></label><div className="date-range compact-date-range"><label>From<input aria-label="Services from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /></label><label>To<input aria-label="Services to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /></label></div><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
-      {filtered.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{filtered.slice((page - 1) * pageSize, page * pageSize).map((job) => {
-        const due = Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments));
-        return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(job.inDate)}</span></td><td><strong>{job.customerName}</strong></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td>{job.contactNumber}</td><td><select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><span className="muted-cell">{job.deliveryOutDate ? dateLabel(job.deliveryOutDate) : "—"}</span></td><td>{job.deliveryOutPerson || "—"}</td><td><strong>{money(job.serviceAmount)}</strong></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
-      })}</tbody></table></div> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
+      {filtered.length ? <ServiceJobsTable services={filtered.slice((page - 1) * pageSize, page * pageSize)} vendors={vendors} onView={onView} onPayment={onPayment} onUpdate={onUpdate} onVendorChange={onVendorChange} canEdit={canEdit} /> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
       {filtered.length > 0 && <Pagination page={page} pages={pages} total={filtered.length} pageSize={pageSize} onPage={setPage} />}
     </div>
   </>;
+}
+
+function ServiceJobsTable({ services, vendors, onView, onPayment, onUpdate, onVendorChange, canEdit }: {
+  services: ServiceJob[];
+  vendors: ServiceVendor[];
+  onView: (id: string) => void;
+  onPayment: (id: string) => void;
+  onUpdate: (service: ServiceJob) => void;
+  onVendorChange: (service: ServiceJob, vendorId?: string) => void;
+  canEdit: boolean;
+}) {
+  const sortedVendors = vendors.slice().sort((a, b) => a.name.localeCompare(b.name));
+  return <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>VENDOR</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{services.map((job) => {
+    const due = Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments));
+    return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(job.inDate)}</span></td><td><strong>{job.customerName}</strong></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td>{job.contactNumber}</td><td><select className="input vendor-select" value={job.vendorId ?? ""} disabled={!canEdit} aria-label={`Select vendor for ${job.serviceNumber}`} onChange={(event) => onVendorChange(job, event.target.value || undefined)}><option value="">No vendor</option>{sortedVendors.map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name}</option>)}</select></td><td><select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><span className="muted-cell">{job.deliveryOutDate ? dateLabel(job.deliveryOutDate) : "—"}</span></td><td>{job.deliveryOutPerson || "—"}</td><td><strong>{money(job.serviceAmount)}</strong></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
+  })}</tbody></table></div>;
 }
 
 function ReadyPage({ services, onView, onPayment, onReturn, canEditPayment, canReturn, canViewAllServices }: {
@@ -1298,8 +1595,8 @@ function ReadyPage({ services, onView, onPayment, onReturn, canEditPayment, canR
   </>;
 }
 
-function ServiceDetail({ service, settings, onBack, onPayment, onUpdate, canEdit }: {
-  service?: ServiceJob; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; canEdit: boolean;
+function ServiceDetail({ service, vendor, settings, onBack, onPayment, onUpdate, canEdit }: {
+  service?: ServiceJob; vendor?: ServiceVendor; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; canEdit: boolean;
 }) {
   if (!service) return <NotFound title="Service job not found" backLabel="Back to services" onBack={onBack} />;
   const due = Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments));
@@ -1307,7 +1604,7 @@ function ServiceDetail({ service, settings, onBack, onPayment, onUpdate, canEdit
     <PageHeader eyebrow="SERVICE JOB" title={service.serviceNumber} description={`${service.brand} ${service.mobileModel} · Received ${dateLabel(service.inDate)}`}><Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> All services</Button><Button variant="secondary" onClick={() => downloadServiceReceipt(service, settings)}><Download size={15} /> Download PDF</Button><Button variant="secondary" onClick={() => printReceipt(service, settings)}><Printer size={15} /> Print receipt</Button></PageHeader>
     <div className="detail-grid"><div className="detail-main">
       <section className="panel detail-panel"><div className="panel-heading"><div><h2>Repair status</h2><p>Track the job from intake through handover.</p></div><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned"} onChange={(event) => onUpdate({ ...service, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : service.readyAt, deliveryOutDate: event.target.value === "Returned" ? new Date().toISOString() : service.deliveryOutDate })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></div><div className="status-timeline">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status, index) => { const completed = (["Received", "In progress", "Ready", "Returned"] as string[]).indexOf(service.status) >= index; return <div className={`timeline-step ${completed ? "done" : ""}`} key={status}><span>{completed ? <Check size={13} /> : index + 1}</span><strong>{status}</strong>{index < 3 && <i />}</div>; })}</div></section>
-      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Device & issue</h2><p>What came in, and what needs attention.</p></div></div><div className="detail-fields"><DetailField label="Customer" value={service.customerName} /><DetailField label="Contact number" value={service.contactNumber} /><DetailField label="Device" value={`${service.brand} ${service.mobileModel}`} /><DetailField label="IMEI" value={service.imei || "Not recorded"} /><DetailField label="Reported fault" value={service.reportedFault} /><DetailField label="Received condition" value={service.receivedConditions.join(", ") || "Not specified"} /><DetailField label="Technician notes" value={service.technicianNotes || "—"} /><DetailField label="Additional remarks" value={service.remarks || "—"} /></div><div className="credential-notice"><ShieldCheck size={16} /><span>Device unlock credentials are not collected or shown on this job record.</span></div></section>
+      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Device & issue</h2><p>What came in, and what needs attention.</p></div></div><div className="detail-fields"><DetailField label="Customer" value={service.customerName} /><DetailField label="Contact number" value={service.contactNumber} /><DetailField label="Device" value={`${service.brand} ${service.mobileModel}`} /><DetailField label="Service vendor" value={vendor ? `${vendor.name} · ${vendor.phone}` : "Not assigned"} /><DetailField label="IMEI" value={service.imei || "Not recorded"} /><DetailField label="Reported fault" value={service.reportedFault} /><DetailField label="Received condition" value={service.receivedConditions.join(", ") || "Not specified"} /><DetailField label="Technician notes" value={service.technicianNotes || "—"} /><DetailField label="Additional remarks" value={service.remarks || "—"} /></div><div className="credential-notice"><ShieldCheck size={16} /><span>Device unlock credentials are not collected or shown on this job record.</span></div></section>
       <section className="panel detail-panel"><div className="panel-heading"><div><h2>Payment history</h2><p>Payments are recorded as separate entries.</p></div>{canEdit && due > 0 && <Button variant="secondary" onClick={() => onPayment(service.id)}><Plus size={14} /> Add payment</Button>}</div>{service.payments.length ? <div className="payment-history">{service.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section>
       {(service.deliveryHistory?.length ?? 0) > 0 && <section className="panel detail-panel"><div className="panel-heading"><div><h2>Delivery history</h2><p>Recorded handovers for this device.</p></div></div><div className="payment-history">{service.deliveryHistory?.slice().reverse().map((entry, index) => <div className="payment-row" key={`${entry.date}-${index}`}><span className="payment-method-icon"><CheckCircle2 size={15} /></span><span><strong>Handed over to customer</strong><small>{dateLabel(entry.date)} · Picked up by {entry.person}{entry.staff ? ` · Returned by ${entry.staff}` : ""}{entry.remarks ? ` · ${entry.remarks}` : ""}</small></span></div>)}</div></section>}
     </div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service balance</strong><small>{service.status}</small></span></div><div className="total-lines"><span>Service amount <strong>{money(service.serviceAmount)}</strong></span><span>Discount <strong>− {money(service.discount)}</strong></span><span>Amount paid <strong>{money(paymentTotal(service.payments))}</strong></span><div className="total-final"><span>Balance due</span><strong>{money(due)}</strong></div></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(service.id)}><CreditCard size={15} /> Record payment</Button>}</div>{service.deliveryOutDate && <div className="panel delivery-note"><CheckCircle2 size={17} /><strong>Device returned</strong><span>{dateLabel(service.deliveryOutDate)}{service.deliveryOutPerson ? ` · Picked up by ${service.deliveryOutPerson}` : ""}{service.deliveryOutStaff ? ` · Returned by ${service.deliveryOutStaff}` : ""}</span>{service.deliveryRemarks && <small>{service.deliveryRemarks}</small>}</div>}</aside></div>
@@ -1467,6 +1764,151 @@ function CustomersPage({ customers, sales, services, search, onSearch, onAdd, se
   </>;
 }
 
+function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selectedId, onSelect, onAdd, onCreateService, onEditService, onStatusChange, onDeleteVendor, canEdit }: {
+  vendors: ServiceVendor[];
+  vendorServices: VendorService[];
+  search: string;
+  onSearch: (value: string) => void;
+  selectedId: string;
+  onSelect: (id: string) => void;
+  onAdd: () => void;
+  onCreateService: (vendor: ServiceVendor) => void;
+  onEditService: (service: VendorService) => void;
+  onStatusChange: (service: VendorService, status: ServiceStatus) => void;
+  onDeleteVendor: (vendor: ServiceVendor) => void;
+  canEdit: boolean;
+}) {
+  const [serviceSearch, setServiceSearch] = useState("");
+  const [serviceStatusFilter, setServiceStatusFilter] = useState("All statuses");
+  const [serviceFrom, setServiceFrom] = useState("");
+  const [serviceTo, setServiceTo] = useState("");
+  const [serviceSortBy, setServiceSortBy] = useState("date-desc");
+  const selectedVendor = vendors.find((vendor) => vendor.id === selectedId);
+  if (selectedId) {
+    if (!selectedVendor) return <NotFound title="Service vendor not found" backLabel="Back to vendors" onBack={() => onSelect("")} />;
+    const servicesForVendor = vendorServices
+      .filter((service) => service.vendorId === selectedVendor.id)
+      .sort((a, b) => (b.createdAt || b.inDate).localeCompare(a.createdAt || a.inDate));
+    const filteredVendorServices = servicesForVendor
+      .filter((service) => {
+        const query = serviceSearch.trim().toLowerCase();
+        return (!query || `${service.serviceNumber} ${service.customerName} ${service.brand} ${service.mobileModel} ${service.customerNumber} ${service.status} ${service.deliveryCustomer ?? ""}`.toLowerCase().includes(query))
+          && (serviceStatusFilter === "All statuses" || service.status === serviceStatusFilter)
+          && (!serviceFrom || service.inDate.slice(0, 10) >= serviceFrom)
+          && (!serviceTo || service.inDate.slice(0, 10) <= serviceTo);
+      })
+      .sort((a, b) => serviceSortBy === "date-asc" ? a.inDate.localeCompare(b.inDate)
+        : serviceSortBy === "charge-desc" ? b.serviceCharge - a.serviceCharge
+        : serviceSortBy === "charge-asc" ? a.serviceCharge - b.serviceCharge
+        : b.inDate.localeCompare(a.inDate) || b.createdAt.localeCompare(a.createdAt));
+    const exportVendorServicesPdf = () => {
+      const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 10;
+      const columns = [
+        { title: "SERVICE BILL NO.", width: 27 },
+        { title: "IN DATE", width: 19 },
+        { title: "CUSTOMER", width: 31 },
+        { title: "MOBILE WITH MODEL", width: 34 },
+        { title: "CUSTOMER NUMBER", width: 27 },
+        { title: "STATUS", width: 23 },
+        { title: "DELIVERY DATE", width: 20 },
+        { title: "DELIVERY CUSTOMER", width: 32 },
+        { title: "SERVICE CHARGE", width: 22 },
+      ];
+      const totalCharge = filteredVendorServices.reduce((total, service) => total + service.serviceCharge, 0);
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      pdf.text(`${selectedVendor.name} · Vendor Services`, margin, 13);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
+      pdf.text(`Mobile: ${selectedVendor.phone}  |  Period: ${serviceFrom || "All"} to ${serviceTo || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`, margin, 20);
+      pdf.text(`Services: ${filteredVendorServices.length}  |  Service charges: ${pdfMoney(totalCharge)}  |  Status: ${serviceStatusFilter}`, margin, 26);
+      const drawHeader = (y: number) => {
+        pdf.setFillColor(238, 242, 248);
+        pdf.rect(margin, y - 4, columns.reduce((total, column) => total + column.width, 0), 7, "F");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(7);
+        let x = margin;
+        columns.forEach((column) => {
+          pdf.text(column.title, x + 1, y);
+          x += column.width;
+        });
+        pdf.setFont("helvetica", "normal");
+        return y + 6;
+      };
+      let y = drawHeader(34);
+      filteredVendorServices.forEach((service) => {
+        const values = [
+          service.serviceNumber,
+          dateLabel(service.inDate),
+          service.customerName,
+          `${service.brand} ${service.mobileModel}`.trim(),
+          service.customerNumber,
+          service.status,
+          service.deliveryDate ? dateLabel(service.deliveryDate) : "—",
+          service.deliveryCustomer || "—",
+          pdfMoney(service.serviceCharge),
+        ];
+        const lines = values.map((value, index) => pdf.splitTextToSize(value || "—", columns[index].width - 2) as string[]);
+        const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
+        if (y + rowHeight > pageHeight - 12) {
+          pdf.addPage();
+          y = drawHeader(14);
+        }
+        let x = margin;
+        lines.forEach((cellLines, index) => {
+          pdf.text(cellLines, x + 1, y, { maxWidth: columns[index].width - 2 });
+          x += columns[index].width;
+        });
+        y += rowHeight;
+        pdf.setDrawColor(225, 230, 238);
+        pdf.line(margin, y - 2, margin + columns.reduce((total, column) => total + column.width, 0), y - 2);
+      });
+      const pageCount = pdf.getNumberOfPages();
+      for (let page = 1; page <= pageCount; page += 1) {
+        pdf.setPage(page);
+        pdf.setFontSize(8);
+        pdf.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 5, { align: "right" });
+      }
+      const filename = selectedVendor.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      pdf.save(`${filename || "vendor"}-services-${dateInputValue()}.pdf`);
+    };
+    return <>
+      <PageHeader eyebrow="SERVICE VENDOR" title={selectedVendor.name} description={`Mobile: ${selectedVendor.phone} · ${servicesForVendor.length} vendor service${servicesForVendor.length === 1 ? "" : "s"}`}><Button variant="secondary" onClick={() => onSelect("")}><ArrowLeft size={15} /> All vendors</Button>{canEdit && <Button variant="secondary" onClick={() => onDeleteVendor(selectedVendor)}><Trash2 size={15} /> Delete vendor</Button>}<Button variant="secondary" onClick={exportVendorServicesPdf}><Download size={15} /> Export PDF</Button>{canEdit && <Button onClick={() => onCreateService(selectedVendor)}><Plus size={16} /> Add service</Button>}</PageHeader>
+      <div className="panel table-panel">
+        <div className="panel-heading"><div><h2>Vendor services</h2><p>Entries saved only for {selectedVendor.name}.</p></div></div>
+        <div className="table-toolbar">
+          <label className="table-search"><Search size={16} /><input value={serviceSearch} onChange={(event) => setServiceSearch(event.target.value)} placeholder="Search bill, customer, model or phone…" /></label>
+          <div className="table-filters">
+            <label className="select-wrap"><Filter size={15} /><select aria-label="Filter vendor services by status" value={serviceStatusFilter} onChange={(event) => setServiceStatusFilter(event.target.value)}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label>
+            <div className="date-range compact-date-range"><label>From<input aria-label="Vendor services from date" className="input date-filter" type="date" value={serviceFrom} onChange={(event) => setServiceFrom(event.target.value)} /></label><label>To<input aria-label="Vendor services to date" className="input date-filter" type="date" value={serviceTo} onChange={(event) => setServiceTo(event.target.value)} /></label></div>
+            <label className="select-wrap"><span>Sort</span><select aria-label="Sort vendor services" value={serviceSortBy} onChange={(event) => setServiceSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="charge-desc">Highest charge</option><option value="charge-asc">Lowest charge</option></select><ChevronDown size={14} /></label>
+            <span className="table-results">{filteredVendorServices.length} of {servicesForVendor.length} services</span>
+          </div>
+        </div>
+        {filteredVendorServices.length
+          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}><td><button className="table-primary-link" disabled={!canEdit} onClick={() => onEditService(service)}>{service.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(service.inDate)}</span></td><td>{service.customerName}</td><td><strong>{service.brand} {service.mobileModel}</strong></td><td>{service.customerNumber}</td><td><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit} aria-label={`Update status for ${service.serviceNumber}`} onChange={(event) => onStatusChange(service, event.target.value as ServiceStatus)}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td><td>{service.deliveryCustomer || "—"}</td><td><strong>{money(service.serviceCharge)}</strong></td></tr>)}</tbody></table></div>
+          : <EmptyState icon={Wrench} title={servicesForVendor.length ? "No matching vendor services" : "No vendor services yet"} detail={servicesForVendor.length ? "Adjust your search or filters to see matching services." : "Add a service here to save it only under this vendor."} action={!servicesForVendor.length && canEdit ? <Button onClick={() => onCreateService(selectedVendor)}><Plus size={15} /> Add service</Button> : undefined} />}
+      </div>
+    </>;
+  }
+  const query = search.trim().toLowerCase();
+  const filteredVendors = vendors
+    .filter((vendor) => !query || `${vendor.name} ${vendor.phone}`.toLowerCase().includes(query))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return <>
+    <PageHeader eyebrow="REPAIR PARTNERS" title="Service vendors" description="Keep vendor contacts and their separate service records.">{canEdit && <Button onClick={onAdd}><Plus size={16} /> Add service vendor</Button>}</PageHeader>
+    <div className="panel table-panel">
+      <div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Search vendor name or mobile…" /></label><span className="table-results">{filteredVendors.length} vendors</span></div>
+      {filteredVendors.length
+        ? <div className="table-scroll"><table className="data-table"><thead><tr><th>VENDOR NAME</th><th>MOBILE NUMBER</th><th>SERVICES</th><th /></tr></thead><tbody>{filteredVendors.map((vendor) => <tr key={vendor.id}><td><button className="table-primary-link" onClick={() => onSelect(vendor.id)}>{vendor.name}</button></td><td>{vendor.phone}</td><td>{vendorServices.filter((service) => service.vendorId === vendor.id).length}</td><td><button className="row-action" aria-label={`View services for ${vendor.name}`} onClick={() => onSelect(vendor.id)}><ArrowRight size={15} /></button>{canEdit && <button className="row-action danger-action" aria-label={`Delete ${vendor.name}`} onClick={() => onDeleteVendor(vendor)}><Trash2 size={15} /></button>}</td></tr>)}</tbody></table></div>
+        : <EmptyState icon={Store} title={vendors.length ? "No vendors found" : "Add your first service vendor"} detail={vendors.length ? "Try another name or mobile number." : "Save a vendor's name and mobile number, then add service records under that vendor."} action={!vendors.length && canEdit ? <Button onClick={onAdd}><Plus size={15} /> Add service vendor</Button> : undefined} />}
+    </div>
+  </>;
+}
+
 function CustomerModal({ title = "Add customer", initial, onClose, onSave }: {
   title?: string;
   initial?: Customer;
@@ -1487,12 +1929,147 @@ function CustomerModal({ title = "Add customer", initial, onClose, onSave }: {
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">CUSTOMER DIRECTORY</span><h2>{title}</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><FormField label="Full name"><input className="input" value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} placeholder="e.g. Priya Sharma" /></FormField><FormField label="Contact number"><input className="input" value={values.phone} onChange={(event) => setValues({ ...values, phone: event.target.value })} placeholder="+91 98765 43210" /></FormField><FormField label="Email (optional)"><input className="input" type="email" value={values.email} onChange={(event) => setValues({ ...values, email: event.target.value })} placeholder="priya@example.com" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Pencil size={14} /> {title}</>}</Button></div></form></div>;
 }
 
-function ReportsPage({ sales, services }: { sales: Sale[]; services: ServiceJob[] }) {
+function ServiceVendorModal({ onClose, onSave }: {
+  onClose: () => void;
+  onSave: (name: string, phone: string) => Promise<void>;
+}) {
+  const [values, setValues] = useState({ name: "", phone: "" });
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const parsed = serviceVendorSchema.safeParse(values);
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? "Check the vendor details.");
+      return;
+    }
+    setSaving(true);
+    try { await onSave(parsed.data.name, parsed.data.phone); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save this vendor."); }
+    finally { setSaving(false); }
+  };
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">SERVICE PARTNERS</span><h2>Add service vendor</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><FormField label="Vendor name"><input className="input" value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} placeholder="e.g. City Mobile Repairs" autoFocus /></FormField><FormField label="Mobile number"><input className="input" inputMode="tel" value={values.phone} onChange={(event) => setValues({ ...values, phone: event.target.value })} placeholder="+91 98765 43210" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Plus size={15} /> Add vendor</>}</Button></div></form></div>;
+}
+
+function VendorDeleteModal({ vendor, linkedEntries, linkedJobs, onCancel, onConfirm }: {
+  vendor: ServiceVendor;
+  linkedEntries: number;
+  linkedJobs: number;
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await onConfirm();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The vendor could not be deleted. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (!saving && event.target === event.currentTarget) onCancel(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">SERVICE PARTNERS</span><h2>Delete {vendor.name}?</h2></div><button className="icon-btn" type="button" disabled={saving} onClick={onCancel} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><p>This permanently deletes the vendor and {linkedEntries} associated vendor service {linkedEntries === 1 ? "entry" : "entries"}.</p>{linkedJobs > 0 && <p>{linkedJobs} service desk {linkedJobs === 1 ? "job will" : "jobs will"} remain, but the vendor assignment will be removed.</p>}<p>This action cannot be undone.</p>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" disabled={saving} onClick={onCancel}>Cancel</Button><Button type="submit" variant="danger" disabled={saving}><Trash2 size={15} />{saving ? "Deleting…" : "Delete vendor"}</Button></div></form></div>;
+}
+
+function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
+  vendor: ServiceVendor;
+  initialServiceNumber: string;
+  onClose: () => void;
+  onSave: (service: Omit<VendorService, "id" | "createdAt" | "vendorId">) => Promise<void>;
+}) {
+  const [values, setValues] = useState({
+    serviceNumber: initialServiceNumber, inDate: dateInputValue(), customerName: "", brand: "", mobileModel: "",
+    customerNumber: "", status: "Received" as ServiceStatus, deliveryDate: "", deliveryCustomer: "", serviceCharge: "",
+  });
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const parsed = vendorServiceFormSchema.safeParse(values);
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? "Check the service details.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({
+        ...parsed.data,
+        inDate: businessDateTime(parsed.data.inDate),
+        deliveryDate: parsed.data.deliveryDate ? businessDateTime(parsed.data.deliveryDate) : undefined,
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save this vendor service.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const update = (field: keyof typeof values, value: string) => setValues((current) => ({ ...current, [field]: value }));
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">SERVICE FOR {vendor.name.toUpperCase()}</span><h2>Add vendor service</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="modal-fields form-grid two-col">
+    <FormField label="Service bill number"><input className="input" value={values.serviceNumber} onChange={(event) => update("serviceNumber", event.target.value)} autoFocus /><span className="field-hint">Auto-generated; edit if needed.</span></FormField>
+    <FormField label="In date"><input className="input" type="date" value={values.inDate} onChange={(event) => update("inDate", event.target.value)} /></FormField>
+    <FormField label="Customer name"><input className="input" value={values.customerName} onChange={(event) => update("customerName", event.target.value)} /></FormField>
+    <FormField label="Customer number"><input className="input" inputMode="tel" value={values.customerNumber} onChange={(event) => update("customerNumber", event.target.value)} /></FormField>
+    <FormField label="Brand"><input className="input" value={values.brand} onChange={(event) => update("brand", event.target.value)} /></FormField>
+    <FormField label="Model"><input className="input" value={values.mobileModel} onChange={(event) => update("mobileModel", event.target.value)} /></FormField>
+    <FormField label="Status"><select className="input" value={values.status} onChange={(event) => update("status", event.target.value)}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></FormField>
+    <FormField label="Service charge (₹)"><input className="input" type="number" min="0" value={values.serviceCharge} onChange={(event) => update("serviceCharge", event.target.value)} /></FormField>
+    <FormField label="Delivery date (optional)"><input className="input" type="date" value={values.deliveryDate} onChange={(event) => update("deliveryDate", event.target.value)} /></FormField>
+    <FormField label="Delivery customer"><input className="input" value={values.deliveryCustomer} onChange={(event) => update("deliveryCustomer", event.target.value)} /></FormField>
+    {error && <span className="field-error">{error}</span>}
+  </div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Plus size={15} /> Save service</>}</Button></div></form></div>;
+}
+
+function VendorServiceDeliveryModal({ service, vendor, onClose, onSave }: {
+  service: VendorService;
+  vendor: ServiceVendor;
+  onClose: () => void;
+  onSave: (delivery: Pick<VendorService, "deliveryDate" | "deliveryCustomer">) => Promise<void>;
+}) {
+  const [deliveryDate, setDeliveryDate] = useState(service.deliveryDate?.slice(0, 10) || dateInputValue());
+  const [deliveryCustomer, setDeliveryCustomer] = useState(service.deliveryCustomer ?? "");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!deliveryDate) {
+      setError("Choose a delivery date.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({
+        deliveryDate: businessDateTime(deliveryDate),
+        deliveryCustomer: deliveryCustomer.trim(),
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save delivery details.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">{vendor.name.toUpperCase()} · {service.serviceNumber}</span><h2>Delivery details</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><FormField label="Delivery date"><input className="input" type="date" value={deliveryDate} onChange={(event) => setDeliveryDate(event.target.value)} required /><span className="field-hint">Defaults to today.</span></FormField><FormField label="Delivery customer"><input className="input" value={deliveryCustomer} onChange={(event) => setDeliveryCustomer(event.target.value)} placeholder="Name of the person receiving the device" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} /> Save delivery details</>}</Button></div></form></div>;
+}
+
+function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canViewServices }: {
+  data: WorkspaceData;
+  revenuePeriod: RevenuePeriod;
+  setRevenuePeriod: (period: RevenuePeriod) => void;
+  canViewSales: boolean;
+  canViewServices: boolean;
+}) {
+  const { sales, services } = data;
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const included = (date: string) => (!from || date >= from) && (!to || date <= `${to}T23:59:59`);
   const filteredSales = sales.filter((sale) => included(sale.invoiceDate));
   const filteredServices = services.filter((service) => included(service.inDate));
+  const filteredVendorServices = data.vendorServices.filter((service) => included(service.inDate));
   const salesTotal = filteredSales.reduce((sum, sale) => sum + sale.finalAmount, 0);
   const collected = filteredSales.reduce((sum, sale) => sum + paymentTotal(sale.payments), 0)
     + filteredServices.reduce((sum, service) => sum + paymentTotal(service.payments), 0);
@@ -1589,9 +2166,11 @@ function ReportsPage({ sales, services }: { sales: Sale[]; services: ServiceJob[
   };
   return <>
     <PageHeader eyebrow="BUSINESS INSIGHTS" title="Reports" description="A clear picture of sales, services, and the money collected."><Button variant="secondary" onClick={exportServicesPdf}><Download size={15} /> Export services PDF</Button><Button variant="secondary" onClick={exportCsv}><Download size={15} /> Export CSV</Button></PageHeader>
+    <RevenueAnalytics data={data} period={revenuePeriod} onPeriodChange={setRevenuePeriod} canViewSales={canViewSales} canViewServices={canViewServices} />
     <section className="panel report-filter"><div><strong>Report period</strong><span>Choose a date range for your records.</span></div><div className="date-range"><label>From<input className="input" type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><ArrowRight size={15} /><label>To<input className="input" type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label><button className="text-link" onClick={() => { setFrom(""); setTo(""); }}>Clear</button></div></section>
     <div className="report-metrics">{[{ label: "Sales billed", value: money(salesTotal), note: `${filteredSales.length} invoices`, icon: CreditCard }, { label: "Service revenue", value: money(filteredServices.reduce((sum, item) => sum + item.serviceAmount - item.discount, 0)), note: `${filteredServices.length} jobs`, icon: Wrench }, { label: "Collected", value: money(collected), note: "Sales & service payments", icon: CheckCircle2 }, { label: "Outstanding", value: money(due), note: "Remaining balances", icon: Clock3 }].map(({ label, value, note, icon: Icon }) => <div className="panel report-metric" key={label}><span className="metric-icon blue"><Icon size={17} /></span><span>{label}<strong>{value}</strong><small>{note}</small></span></div>)}</div>
-    <div className="reports-grid"><section className="panel report-chart-panel"><div className="panel-heading"><div><h2>Revenue over time</h2><p>Filtered invoice and service totals</p></div></div>{filteredSales.length + filteredServices.length ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartForPeriod({ ...EMPTY_DATA, sales: filteredSales, services: filteredServices }, "Month")}><CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><Tooltip formatter={(value) => money(Number(value))} /><Area type="monotone" dataKey="sales" stroke="#4777f5" fill="#4777f5" fillOpacity={0.12} /><Area type="monotone" dataKey="services" stroke="#22ad94" fill="#22ad94" fillOpacity={0.12} /></AreaChart></ResponsiveContainer></div> : <EmptyState icon={BarChart3} title="Your reports will grow with you" detail="Add sales and service jobs to see your revenue trends." />}</section><section className="panel report-status-panel"><div className="panel-heading"><div><h2>Service status</h2><p>Jobs by current stage</p></div></div>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => { const count = filteredServices.filter((service) => service.status === status).length; const ratio = filteredServices.length ? count / filteredServices.length * 100 : 0; return <div className="report-status" key={status}><div><span>{status}</span><strong>{count}</strong></div><div className="progress-track"><i className={`progress-${statusClass(status)}`} style={{ width: `${ratio}%` }} /></div></div>; })}</section></div>
+    <div className="reports-grid"><section className="panel report-chart-panel"><div className="panel-heading"><div><h2>Revenue over time</h2><p>Filtered sales, service, and vendor service totals</p></div></div>{filteredSales.length + filteredServices.length + filteredVendorServices.length ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartForPeriod({ ...EMPTY_DATA, sales: filteredSales, services: filteredServices, vendorServices: filteredVendorServices }, "Month")}><CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><Tooltip formatter={(value) => money(Number(value))} /><Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" fill="#4777f5" fillOpacity={0.12} /><Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" fill="#22ad94" fillOpacity={0.12} /><Area type="monotone" dataKey="vendorServices" name="Vendor services" stroke="#8c71e8" fill="#8c71e8" fillOpacity={0.12} /></AreaChart></ResponsiveContainer></div> : <EmptyState icon={BarChart3} title="Your reports will grow with you" detail="Add sales and service jobs to see your revenue trends." />}</section><section className="panel report-status-panel"><div className="panel-heading"><div><h2>Service status</h2><p>Jobs by current stage</p></div></div>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => { const count = filteredServices.filter((service) => service.status === status).length; const ratio = filteredServices.length ? count / filteredServices.length * 100 : 0; return <div className="report-status" key={status}><div><span>{status}</span><strong>{count}</strong></div><div className="progress-track"><i className={`progress-${statusClass(status)}`} style={{ width: `${ratio}%` }} /></div></div>; })}</section></div>
+    {canViewServices && <VendorAnalytics data={data} period={revenuePeriod} />}
   </>;
 }
 

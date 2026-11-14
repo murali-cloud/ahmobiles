@@ -10,6 +10,7 @@ const permissionsSchema = z.object({
   overview: accessSchema,
   sales: accessSchema,
   services: accessSchema,
+  vendors: accessSchema,
   ready: accessSchema,
   customers: accessSchema,
   reports: accessSchema,

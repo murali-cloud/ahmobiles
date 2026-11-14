@@ -26,7 +26,7 @@ import {
 } from "firebase/firestore";
 import type {
   Customer, EmployeeAccount, EmployeeModule, EmployeePermissions,
-  Payment, Sale, ServiceJob, ShopSettings, WorkspaceData, WorkspaceIdentity,
+  Payment, Sale, ServiceJob, ServiceVendor, ShopSettings, VendorService, WorkspaceData, WorkspaceIdentity,
 } from "./types";
 import { ADMIN_PERMISSIONS, DEFAULT_SETTINGS, NO_EMPLOYEE_PERMISSIONS } from "./types";
 
@@ -154,10 +154,12 @@ export function observeWorkspace(
   let sales: Sale[] = [];
   let services: ServiceJob[] = [];
   let customers: Customer[] = [];
+  const vendors: ServiceVendor[] = [];
+  const vendorServices: VendorService[] = [];
   let settings: ShopSettings = DEFAULT_SETTINGS;
-  const loaded = { sales: false, services: false, customers: false, settings: false };
+  const loaded = { sales: false, services: false, customers: false, vendors: true, vendorServices: true, settings: false };
   const emit = () => {
-    if (Object.values(loaded).every(Boolean)) onData({ sales, services, customers, settings });
+    if (Object.values(loaded).every(Boolean)) onData({ sales, services, customers, vendors, vendorServices, settings });
   };
   const stops: Unsubscribe[] = [];
   const handleError = (reason: Error, section: keyof typeof loaded) => {
@@ -282,6 +284,103 @@ export async function createNumberedRecord(
   return { id: payload.id, number: payload.number };
 }
 
+export async function createServiceVendor(name: string, phone: string): Promise<ServiceVendor> {
+  const token = await authenticatedToken();
+  const response = await fetch("/api/vendors", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ name, phone }),
+  });
+  const responseBody = await response.text();
+  if (!responseBody.trim()) {
+    throw new Error(`The server returned an empty response while saving the vendor (HTTP ${response.status}).`);
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(responseBody);
+  } catch {
+    throw new Error(`The server returned an invalid response while saving the vendor (HTTP ${response.status}).`);
+  }
+  if (!isRecord(payload)) {
+    throw new Error(`The server returned an invalid response while saving the vendor (HTTP ${response.status}).`);
+  }
+  if (!response.ok) {
+    throw new Error(typeof payload.error === "string" ? payload.error : `The vendor could not be saved (HTTP ${response.status}).`);
+  }
+  if (!isRecord(payload.vendor) || typeof payload.vendor.id !== "string"
+    || typeof payload.vendor.name !== "string" || typeof payload.vendor.phone !== "string"
+    || typeof payload.vendor.createdAt !== "string") {
+    throw new Error(`The server did not confirm the vendor was saved (HTTP ${response.status}).`);
+  }
+  return {
+    id: payload.vendor.id,
+    name: payload.vendor.name,
+    phone: payload.vendor.phone,
+    createdAt: payload.vendor.createdAt,
+  };
+}
+
+async function vendorApiRequest(path: string, method: "GET" | "POST" | "PATCH" | "DELETE", body?: unknown): Promise<unknown> {
+  const token = await authenticatedToken();
+  const response = await fetch(path, {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const responseBody = await response.text();
+  let payload: unknown;
+  try { payload = JSON.parse(responseBody); }
+  catch { throw new Error(`The server returned an invalid response (HTTP ${response.status}).`); }
+  if (!isRecord(payload)) throw new Error(`The server returned an invalid response (HTTP ${response.status}).`);
+  if (!response.ok) throw new Error(typeof payload.error === "string" ? payload.error : `The request failed (HTTP ${response.status}).`);
+  return payload;
+}
+
+export async function deleteServiceVendor(vendorId: string): Promise<void> {
+  const payload = await vendorApiRequest("/api/vendors", "DELETE", { vendorId });
+  if (!isRecord(payload) || payload.success !== true) {
+    throw new Error("The server did not confirm the vendor was deleted.");
+  }
+}
+
+export async function listServiceVendors(): Promise<ServiceVendor[]> {
+  const payload = await vendorApiRequest("/api/vendors", "GET");
+  if (!isRecord(payload) || !Array.isArray(payload.vendors)) {
+    throw new Error("The server returned invalid service vendor data.");
+  }
+  return payload.vendors as ServiceVendor[];
+}
+
+export async function listVendorServices(): Promise<VendorService[]> {
+  const payload = await vendorApiRequest("/api/vendor-services", "GET");
+  if (!isRecord(payload) || !Array.isArray(payload.vendorServices)) {
+    throw new Error("The server returned invalid vendor service data.");
+  }
+  return payload.vendorServices as VendorService[];
+}
+
+export async function createVendorService(
+  service: Omit<VendorService, "id" | "createdAt">,
+): Promise<VendorService> {
+  const payload = await vendorApiRequest("/api/vendor-services", "POST", service);
+  if (!isRecord(payload) || !isRecord(payload.vendorService)
+    || typeof payload.vendorService.id !== "string"
+    || typeof payload.vendorService.createdAt !== "string") {
+    throw new Error("The server did not confirm the vendor service was saved.");
+  }
+  return { ...service, id: payload.vendorService.id, createdAt: payload.vendorService.createdAt };
+}
+
+export async function updateVendorService(
+  serviceId: string,
+  changes: Partial<Pick<VendorService, "status" | "deliveryDate" | "deliveryCustomer">>,
+): Promise<void> {
+  const payload = await vendorApiRequest("/api/vendor-services", "PATCH", { serviceId, ...changes });
+  if (!isRecord(payload) || payload.success !== true) {
+    throw new Error("The server did not confirm the vendor service update.");
+  }
+}
+
 export async function writeRecord(
   uid: string,
   kind: "customers",
@@ -316,6 +415,14 @@ export async function changeServiceStatus(
     recordId,
     status,
     ...delivery,
+  });
+}
+
+export async function changeServiceVendor(uid: string, recordId: string, vendorId?: string): Promise<void> {
+  await mutateRecord(uid, {
+    action: "service-vendor",
+    recordId,
+    vendorId: vendorId ?? null,
   });
 }
 

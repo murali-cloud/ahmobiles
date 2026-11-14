@@ -5,6 +5,7 @@ export const EMPLOYEE_MODULES = [
   { key: "overview", label: "Overview" },
   { key: "sales", label: "Sales" },
   { key: "services", label: "Services" },
+  { key: "vendors", label: "Service vendors" },
   { key: "ready", label: "Ready for delivery" },
   { key: "customers", label: "Customers" },
   { key: "reports", label: "Reports" },
@@ -36,6 +37,7 @@ export const NO_EMPLOYEE_PERMISSIONS: EmployeePermissions = {
   overview: "none",
   sales: "none",
   services: "none",
+  vendors: "none",
   ready: "none",
   customers: "none",
   reports: "none",
@@ -46,6 +48,7 @@ export const ADMIN_PERMISSIONS: EmployeePermissions = {
   overview: "edit",
   sales: "edit",
   services: "edit",
+  vendors: "edit",
   ready: "edit",
   customers: "edit",
   reports: "edit",
@@ -64,6 +67,29 @@ export type Customer = {
   name: string;
   phone: string;
   email?: string;
+  createdAt: string;
+};
+
+export type ServiceVendor = {
+  id: string;
+  name: string;
+  phone: string;
+  createdAt: string;
+};
+
+export type VendorService = {
+  id: string;
+  vendorId: string;
+  serviceNumber: string;
+  inDate: string;
+  customerName: string;
+  brand: string;
+  mobileModel: string;
+  customerNumber: string;
+  status: ServiceStatus;
+  deliveryDate?: string;
+  deliveryCustomer?: string;
+  serviceCharge: number;
   createdAt: string;
 };
 
@@ -96,6 +122,7 @@ export type Sale = {
 export type ServiceJob = {
   id: string;
   serviceNumber: string;
+  vendorId?: string;
   customerId: string;
   customerName: string;
   contactNumber: string;
@@ -140,6 +167,8 @@ export type WorkspaceData = {
   sales: Sale[];
   services: ServiceJob[];
   customers: Customer[];
+  vendors: ServiceVendor[];
+  vendorServices: VendorService[];
   settings: ShopSettings;
 };
 
@@ -160,5 +189,7 @@ export const EMPTY_WORKSPACE: WorkspaceData = {
   sales: [],
   services: [],
   customers: [],
+  vendors: [],
+  vendorServices: [],
   settings: DEFAULT_SETTINGS,
 };
