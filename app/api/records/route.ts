@@ -84,6 +84,8 @@ const patchSchema = z.discriminatedUnion("action", [
     deliveryOutPerson: z.string().trim().min(1).max(120).optional(),
     deliveryRemarks: z.string().max(2000).optional(),
     readyAt: z.string().datetime().optional(),
+    returnOutcome: z.enum(["Repaired", "Not repaired"]).optional(),
+    refundAmount: z.number().finite().min(0).optional(),
   }).strict(),
   z.object({
     action: z.literal("service-vendor"),
@@ -372,7 +374,8 @@ export async function PATCH(request: Request) {
       };
       if (update.status === "Ready") patch.readyAt = new Date().toISOString();
       if (update.status === "Returned") {
-        if (record.status !== "Ready" || !update.deliveryOutDate || !update.deliveryOutPerson) {
+        const notRepaired = update.returnOutcome === "Not repaired";
+        if ((!notRepaired && record.status !== "Ready") || !update.deliveryOutDate || !update.deliveryOutPerson) {
           throw new Error("HANDOVER_DETAILS_REQUIRED");
         }
         patch.deliveryOutDate = update.deliveryOutDate;
@@ -380,6 +383,37 @@ export async function PATCH(request: Request) {
         patch.deliveryOutStaff = actor.username;
         patch.deliveryOutStaffId = actor.uid;
         patch.deliveryRemarks = update.deliveryRemarks ?? "";
+        if (notRepaired) {
+          const existingRefunds = Array.isArray(record.refunds)
+            ? record.refunds as Array<{ id: string; amount: number; date: string; notes?: string }>
+            : [];
+          const received = sumPayments(Array.isArray(record.payments) ? record.payments as Array<{ amount: number }> : []);
+          const alreadyRefunded = sumPayments(existingRefunds);
+          const refundAmount = rounded(update.refundAmount ?? 0);
+          if (refundAmount > received - alreadyRefunded) throw new Error("REFUND_EXCEEDS_ADVANCE");
+          const refunds = [...existingRefunds];
+          if (refundAmount > 0) refunds.push({
+            id: randomUUID(), amount: refundAmount, date: new Date().toISOString(),
+            notes: "Advance refunded — product not repaired",
+          });
+          patch.refunds = refunds;
+          patch.returnOutcome = "Not repaired";
+
+          // A device returned unrepaired is not a completed paid service.
+          // Remove its payment entries from both the service record and payment ledger.
+          const recordedPayments = Array.isArray(record.payments)
+            ? record.payments as Array<{ id?: string; amount: number }>
+            : [];
+          for (const payment of recordedPayments) {
+            if (payment.id) {
+              transaction.delete(db.doc(`shops/${uid}/payments/${payment.id}`));
+            }
+          }
+          patch.payments = [];
+          patch.paymentStatus = "Unpaid";
+        } else {
+          patch.returnOutcome = "Repaired";
+        }
         const history = Array.isArray(record.deliveryHistory) ? record.deliveryHistory : [];
         patch.deliveryHistory = [...history, {
           date: update.deliveryOutDate,
@@ -405,6 +439,7 @@ export async function PATCH(request: Request) {
     if (message === "PAYMENT_EXISTS") return responseError("This payment has already been recorded.", 409);
     if (message === "PAYMENT_EXCEEDS_BALANCE") return responseError("Payment cannot exceed the remaining balance.", 400);
     if (message === "HANDOVER_DETAILS_REQUIRED") return responseError("A ready job and delivery person are required before handover.", 400);
+    if (message === "REFUND_EXCEEDS_ADVANCE") return responseError("Refund cannot exceed the unrefunded advance amount.", 400);
     if (message === "JOB_ALREADY_RETURNED") return responseError("This service job has already been returned.", 409);
     if (message === "VENDOR_NOT_FOUND") return responseError("The selected service vendor could not be found.", 400);
     if (message === "VENDOR_DELETING") return responseError("This service vendor is being deleted. Select another vendor.", 409);

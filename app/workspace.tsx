@@ -4,7 +4,7 @@ import {
   Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3,
   Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ClipboardList,
   Clock3, CreditCard, Download, Eye, EyeOff, FileText, Filter, LayoutDashboard, LogOut, Menu, MoreHorizontal, Store,
-  Pencil, Plus, Printer, Search, Settings, ShieldCheck, Smartphone, Trash2, Users, Wrench, X, Zap,
+  Pencil, Plus, Printer, Search, Settings, ShieldCheck, Smartphone, Trash2, Users, Wrench, X, Zap,MessageCircle,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -102,6 +102,19 @@ function dateLabel(value: string): string {
 
 function paymentTotal(payments: Payment[]): number {
   return payments.reduce((sum, payment) => sum + payment.amount, 0);
+}
+
+function servicePaid(service: ServiceJob): number {
+  // Unrepaired returns are treated as having no payment collected.
+  if (service.returnOutcome === "Not repaired") return 0;
+  const refunds = (service.refunds ?? []).reduce((sum, refund) => sum + refund.amount, 0);
+  return Math.max(0, paymentTotal(service.payments) - refunds);
+}
+
+function serviceDue(service: ServiceJob): number {
+  // No service charge is due when the device is returned unrepaired.
+  if (service.returnOutcome === "Not repaired") return 0;
+  return Math.max(0, service.serviceAmount - service.discount - servicePaid(service));
 }
 
 function statusOf(total: number, paid: number): PaymentStatus {
@@ -358,7 +371,15 @@ export default function Workspace() {
           deliveryOutDate: service.deliveryOutDate,
           deliveryOutPerson: service.deliveryOutPerson,
           deliveryRemarks: service.deliveryRemarks,
+          returnOutcome: service.returnOutcome,
+          refundAmount: service.refundAmount,
         });
+        setData((latest) => ({
+          ...latest,
+          services: latest.services.map((item) => item.id === service.id
+            ? { ...item, ...service, payments: service.returnOutcome === "Not repaired" ? [] : service.payments }
+            : item),
+        }));
       } else if (service.payments.length === current.payments.length + 1) {
         const payment = service.payments.at(-1);
         if (!payment) throw new Error("The payment details are incomplete.");
@@ -540,6 +561,42 @@ export default function Workspace() {
     />);
   };
 
+  const showNotRepairedModal = (current: ServiceJob) => {
+    const alreadyRefunded = (current.refunds ?? []).reduce((sum, item) => sum + item.amount, 0);
+    const refundable = Math.max(0, paymentTotal(current.payments) - alreadyRefunded);
+    setModal(<NotRepairedModal
+      service={current}
+      refundable={refundable}
+      onCancel={() => setModal(null)}
+      onSave={async ({ deliveryOutDate, deliveryOutPerson, deliveryRemarks, refundAmount }) => {
+        try {
+          const refund = refundAmount > 0 ? {
+            id: newId(), amount: refundAmount, date: new Date().toISOString(),
+            notes: "Advance refunded — product not repaired",
+          } : undefined;
+          await updateService({
+            ...current,
+            status: "Returned",
+            returnOutcome: "Not repaired",
+            payments: [],
+            refundAmount,
+            refunds: refund ? [...(current.refunds ?? []), refund] : (current.refunds ?? []),
+            deliveryOutDate, deliveryOutPerson, deliveryRemarks,
+            deliveryOutStaff: user?.username ?? "Staff",
+            deliveryOutStaffId: user?.uid ?? "",
+            deliveryHistory: [...(current.deliveryHistory ?? []), {
+              date: deliveryOutDate, person: deliveryOutPerson,
+              staff: user?.username ?? "Staff", staffId: user?.uid ?? "",
+              remarks: deliveryRemarks ?? "Product not repaired; advance refunded: " + money(refundAmount),
+            }],
+          });
+          setModal(null);
+          notify(`Device returned without repair. Refund recorded: ${money(refundAmount)}.`);
+        } catch (reason) { notifyFromError(reason); }
+      }}
+    />);
+  };
+
   const setServiceStatus = (service: ServiceJob, status: ServiceStatus) => {
     const current = data.services.find((item) => item.id === service.id) ?? service;
     if (current.status === "Returned") {
@@ -549,7 +606,7 @@ export default function Workspace() {
     if (status === "Returned") {
       const due = Math.max(
         0,
-        current.serviceAmount - current.discount - paymentTotal(current.payments)
+        current.serviceAmount - current.discount - servicePaid(current)
       );
 
       if (due > 0) {
@@ -679,7 +736,7 @@ export default function Workspace() {
             const service = record as ServiceJob;
             const updatedService = { ...service, payments: [...service.payments, payment] };
             await updateService(updatedService);
-            const remaining = Math.max(0, updatedService.serviceAmount - updatedService.discount - paymentTotal(updatedService.payments));
+            const remaining = Math.max(0, updatedService.serviceAmount - updatedService.discount - servicePaid(updatedService));
             if (returnAfterPayment && remaining <= 0 && updatedService.status === "Ready") {
               notify("Payment completed. Confirm the device handover to finish returning it.");
               showServiceDeliveryModal(updatedService);
@@ -824,7 +881,8 @@ export default function Workspace() {
         vendor={data.vendors.find((item) => item.id === data.services.find((service) => service.id === routeId || service.serviceNumber === routeId)?.vendorId)}
         onBack={() => router.push(canViewModule("services") || canViewModule("reports") ? "/services" : "/services/ready")}
         onPayment={(id) => openPayment("service", id)} settings={data.settings}
-        onUpdate={(service) => setServiceStatus(service, service.status)} canEdit={canEditModule("services")} />
+        onUpdate={(service) => setServiceStatus(service, service.status)}
+        onNotRepaired={(service) => showNotRepairedModal(service)} canEdit={canEditModule("services")} />
     : route === "services"
     ? <ServicesPage services={data.services} search={globalSearch} onSearch={setGlobalSearch}
         onCreate={() => router.push("/services/create")} onView={(id) => router.push(`/services/${id}`)}
@@ -1071,7 +1129,7 @@ function Dashboard({ data, period, setPeriod, revenuePeriod, setRevenuePeriod, c
   const pending = data.services.filter((service) => !["Ready", "Returned"].includes(service.status)).length;
   const readyJobs = data.services.filter((service) => service.status === "Ready");
   const outstanding = data.sales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0)
-    + data.services.reduce((sum, service) => sum + Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)), 0);
+    + data.services.reduce((sum, service) => sum + serviceDue(service), 0);
   const metrics = [
     { label: "Total service jobs", value: String(data.services.length), icon: ClipboardList, accent: "violet", note: "All-time service jobs" },
     { label: "Pending service jobs", value: String(pending), icon: Clock3, accent: "amber", note: "Received or in progress" },
@@ -1126,7 +1184,7 @@ function Dashboard({ data, period, setPeriod, revenuePeriod, setRevenuePeriod, c
         {canViewServices && <section className="panel ready-panel">
           <div className="panel-heading"><div><h2>Waiting for pickup</h2><p>Devices ready to go home</p></div>{canOpenReady && <button className="text-link" onClick={onSeeReady}>Open list <ArrowRight size={14} /></button>}</div>
           {readyJobs.length === 0 ? <EmptyState icon={CheckCircle2} title="All caught up" detail="Jobs marked ready will appear here." /> :
-            <div className="pickup-list">{readyJobs.slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Smartphone size={17} /></span><span className="pickup-info"><strong>{job.customerName}</strong><span>{job.brand} {job.mobileModel} · {job.serviceNumber}</span></span><span className="pickup-balance">{money(Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments)))}</span></div>)}</div>}
+            <div className="pickup-list">{readyJobs.slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Smartphone size={17} /></span><span className="pickup-info"><strong>{job.customerName}</strong><span>{job.brand} {job.mobileModel} · {job.serviceNumber}</span></span><span className="pickup-balance">{money(Math.max(0, job.serviceAmount - job.discount - servicePaid(job)))}</span></div>)}</div>}
         </section>}
         {canViewServices && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button>}</div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{job.brand} {job.mobileModel} · {dateLabel(job.inDate)}</span></span><StatusBadge status={job.status} /></div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={canCreateService ? <Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button> : undefined} />}</section>}
         {canViewServices && <VendorAnalytics data={data} period={revenuePeriod} maxRows={5} />}
@@ -1612,7 +1670,7 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
   const vendorNames = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
   const filtered = services.filter((service) => (!search || `${service.serviceNumber} ${service.customerName} ${service.contactNumber} ${service.brand} ${service.mobileModel} ${service.imei} ${vendorNames.get(service.vendorId ?? "") ?? ""}`.toLowerCase().includes(search.toLowerCase()))
     && (statusFilter === "All statuses" || service.status === statusFilter)
-    && (paymentFilter === "All payments" || statusOf(service.finalAmount, paymentTotal(service.payments)) === paymentFilter)
+    && (paymentFilter === "All payments" || statusOf(service.finalAmount, servicePaid(service)) === paymentFilter)
     && (!from || service.inDate.slice(0, 10) >= from)
     && (!to || service.inDate.slice(0, 10) <= to))
     .sort((a, b) => {
@@ -1723,7 +1781,7 @@ function ServiceJobsTable({ services, vendors, onView, onPayment, onUpdate, onVe
 }) {
   const sortedVendors = vendors.slice().sort((a, b) => a.name.localeCompare(b.name));
   return <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>VENDOR</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{services.map((job) => {
-    const due = Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments));
+    const due = Math.max(0, job.serviceAmount - job.discount - servicePaid(job));
     return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(job.inDate)}</span></td><td><strong>{job.customerName}</strong></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td>{job.contactNumber}</td><td><select className="input vendor-select" value={job.vendorId ?? ""} disabled={!canEdit} aria-label={`Select vendor for ${job.serviceNumber}`} onChange={(event) => onVendorChange(job, event.target.value || undefined)}><option value="">No vendor</option>{sortedVendors.map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name}</option>)}</select></td><td><select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><span className="muted-cell">{job.deliveryOutDate ? dateLabel(job.deliveryOutDate) : "—"}</span></td><td>{job.deliveryOutPerson || "—"}</td><td><strong>{money(job.serviceAmount)}</strong></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
   })}</tbody></table></div>;
 }
@@ -1766,23 +1824,56 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
         <span>{activeList === "services" ? "Collect any remaining balance before handover." : "Vendor service entries marked Ready are listed here."}</span>
       </div>
       {activeList === "services" && <strong className="delivery-total">
-        {money(readyJobs.reduce((sum, item) => sum + Math.max(0, item.serviceAmount - item.discount - paymentTotal(item.payments)), 0))}
+        {money(readyJobs.reduce((sum, item) => sum + Math.max(0, item.serviceAmount - item.discount - servicePaid(item)), 0))}
         <small>total balance</small>
       </strong>}
       {activeList === "vendor" && <strong className="delivery-total">{readyVendorServices.length}<small>ready entries</small></strong>}
     </div>
     {activeList === "services" ? (
       readyJobs.length ? <div className="ready-grid">{readyJobs.map((job) => {
-        const due = Math.max(0, job.serviceAmount - job.discount - paymentTotal(job.payments));
+        const due = Math.max(0, job.serviceAmount - job.discount - servicePaid(job));
         return <article className="ready-card" key={job.id}>
           <div className="ready-card-top"><span className="ready-device-icon"><Smartphone size={20} /></span><StatusBadge status="Ready" /><button className="more-btn" aria-label="More actions" onClick={() => onView(job.id)}><MoreHorizontal size={18} /></button></div>
           <div className="ready-card-id">{job.serviceNumber}</div><h2>{job.brand} {job.mobileModel}</h2><p>{job.reportedFault}</p>
           <div className="ready-customer"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></div>
           <div className="ready-card-meta"><span>Ready since <strong>{dateLabel(job.readyAt ?? job.inDate)}</strong></span><span>Balance <strong className={due ? "balance-due" : "balance-paid"}>{money(due)}</strong></span></div>
           {(canEditPayment || canReturn) && <div className="ready-card-actions">
-            {canEditPayment && due > 0 && <Button variant="secondary" onClick={() => onPayment(job.id)}><CreditCard size={14} /> Collect payment</Button>}
-            {canReturn && <Button onClick={() => onReturn(job)} disabled={due > 0}><Check size={15} />{due > 0 ? "Payment pending" : "Mark returned"}</Button>}
-          </div>}
+  <Button
+    variant="secondary"
+    disabled={!job.contactNumber?.trim()}
+    onClick={() => {
+      const digits = job.contactNumber.replace(/\D/g, "");
+      const whatsappNumber =
+        digits.length === 10 ? `91${digits}` :
+        digits.startsWith("0") && digits.length === 11
+          ? `91${digits.slice(1)}`
+          : digits;
+
+      const message = `Hello ${job.customerName}! Your ${job.brand} ${job.mobileModel} is ready for delivery at A&H Mobiles. Service Bill: ${job.serviceNumber}. Please visit our shop to collect your device. Thank you!`;
+
+      window.open(
+        `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(message)}`,
+        "_blank",
+        "noopener,noreferrer"
+      );
+    }}
+  >
+    <MessageCircle size={15} /> WhatsApp
+  </Button>
+
+  {canEditPayment && due > 0 && (
+    <Button variant="secondary" onClick={() => onPayment(job.id)}>
+      <CreditCard size={14} /> Collect payment
+    </Button>
+  )}
+
+  {canReturn && (
+    <Button onClick={() => onReturn(job)} disabled={due > 0}>
+      <Check size={15} />
+      {due > 0 ? "Payment pending" : "Mark returned"}
+    </Button>
+  )}
+</div>}
         </article>;
       })}</div> : <div className="panel"><EmptyState icon={CheckCircle2} title="No shop services ready" detail="When a service job is marked Ready, it will appear here." action={canViewAllServices ? <Button variant="secondary" onClick={() => router.push("/services")}><Wrench size={15} /> View service jobs</Button> : undefined} /></div>
     ) : (
@@ -1808,13 +1899,13 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
   </>;
 }
 
-function ServiceDetail({ service, vendor, settings, onBack, onPayment, onUpdate, canEdit }: {
-  service?: ServiceJob; vendor?: ServiceVendor; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; canEdit: boolean;
+function ServiceDetail({ service, vendor, settings, onBack, onPayment, onUpdate, onNotRepaired, canEdit }: {
+  service?: ServiceJob; vendor?: ServiceVendor; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; onNotRepaired: (service: ServiceJob) => void; canEdit: boolean;
 }) {
   if (!service) return <NotFound title="Service job not found" backLabel="Back to services" onBack={onBack} />;
-  const due = Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments));
+  const due = serviceDue(service);
   return <>
-    <PageHeader eyebrow="SERVICE JOB" title={service.serviceNumber} description={`${service.brand} ${service.mobileModel} · Received ${dateLabel(service.inDate)}`}><Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> All services</Button><Button variant="secondary" onClick={() => downloadServiceReceipt(service, settings)}><Download size={15} /> Download PDF</Button><Button variant="secondary" onClick={() => printReceipt(service, settings)}><Printer size={15} /> Print receipt</Button></PageHeader>
+    <PageHeader eyebrow="SERVICE JOB" title={service.serviceNumber} description={`${service.brand} ${service.mobileModel} · Received ${dateLabel(service.inDate)}`}><Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> All services</Button><Button variant="secondary" onClick={() => downloadServiceReceipt(service, settings)}><Download size={15} /> Download PDF</Button><Button variant="secondary" onClick={() => printReceipt(service, settings)}><Printer size={15} /> Print receipt</Button>{canEdit && service.status !== "Returned" && <Button variant="danger" onClick={() => onNotRepaired(service)}>Not repaired · Return device</Button>}</PageHeader>
     <div className="detail-grid"><div className="detail-main">
       <section className="panel detail-panel"><div className="panel-heading"><div><h2>Repair status</h2><p>Track the job from intake through handover.</p></div><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned"} onChange={(event) => onUpdate({ ...service, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : service.readyAt, deliveryOutDate: event.target.value === "Returned" ? new Date().toISOString() : service.deliveryOutDate })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></div><div className="status-timeline">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status, index) => { const completed = (["Received", "In progress", "Ready", "Returned"] as string[]).indexOf(service.status) >= index; return <div className={`timeline-step ${completed ? "done" : ""}`} key={status}><span>{completed ? <Check size={13} /> : index + 1}</span><strong>{status}</strong>{index < 3 && <i />}</div>; })}</div></section>
       <section className="panel detail-panel"><div className="panel-heading"><div><h2>Device & issue</h2><p>What came in, and what needs attention.</p></div></div><div className="detail-fields"><DetailField label="Customer" value={service.customerName} /><DetailField label="Contact number" value={service.contactNumber} /><DetailField label="Device" value={`${service.brand} ${service.mobileModel}`} /><DetailField label="Service vendor" value={vendor ? `${vendor.name} · ${vendor.phone}` : "Not assigned"} /><DetailField label="IMEI" value={service.imei || "Not recorded"} /><DetailField label="Reported fault" value={service.reportedFault} /><DetailField label="Received condition" value={service.receivedConditions.join(", ") || "Not specified"} /><DetailField label="Technician notes" value={service.technicianNotes || "—"} /><DetailField label="Additional remarks" value={service.remarks || "—"} /></div></section>
@@ -1823,9 +1914,9 @@ function ServiceDetail({ service, vendor, settings, onBack, onPayment, onUpdate,
     <h2>Payment history</h2>
     <p>Payments are recorded as separate entries.</p>
   </div>
-</div>{service.payments.length ? <div className="payment-history">{service.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section>
+</div>{(service.payments.length || (service.refunds?.length ?? 0)) ? <div className="payment-history">{service.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}{(service.refunds ?? []).map((refund) => <div className="payment-row" key={refund.id}><span className="payment-method-icon"><ArrowLeft size={15} /></span><span><strong>Returned to customer</strong><small>{dateLabel(refund.date)}{refund.notes ? ` · ${refund.notes}` : ""}</small></span><strong className="returned-amount" style={{ color: "#dc2626" }}>− {money(refund.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section>
       {(service.deliveryHistory?.length ?? 0) > 0 && <section className="panel detail-panel"><div className="panel-heading"><div><h2>Delivery history</h2><p>Recorded handovers for this device.</p></div></div><div className="payment-history">{service.deliveryHistory?.slice().reverse().map((entry, index) => <div className="payment-row" key={`${entry.date}-${index}`}><span className="payment-method-icon"><CheckCircle2 size={15} /></span><span><strong>Handed over to customer</strong><small>{dateLabel(entry.date)} · Picked up by {entry.person}{entry.staff ? ` · Returned by ${entry.staff}` : ""}{entry.remarks ? ` · ${entry.remarks}` : ""}</small></span></div>)}</div></section>}
-    </div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service balance</strong><small>{service.status}</small></span></div><div className="total-lines"><span>Service amount <strong>{money(service.serviceAmount)}</strong></span><span>Discount <strong>− {money(service.discount)}</strong></span><span>Amount paid <strong>{money(paymentTotal(service.payments))}</strong></span><div className="total-final"><span>Balance due</span><strong>{money(due)}</strong></div></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(service.id)}><CreditCard size={15} /> Record payment</Button>}</div>{service.deliveryOutDate && <div className="panel delivery-note"><CheckCircle2 size={17} /><strong>Device returned</strong><span>{dateLabel(service.deliveryOutDate)}{service.deliveryOutPerson ? ` · Picked up by ${service.deliveryOutPerson}` : ""}{service.deliveryOutStaff ? ` · Returned by ${service.deliveryOutStaff}` : ""}</span>{service.deliveryRemarks && <small>{service.deliveryRemarks}</small>}</div>}</aside></div>
+    </div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service balance</strong><small>{service.status}</small></span></div><div className="total-lines"><span>Service amount <strong>{money(service.serviceAmount)}</strong></span><span>Discount <strong>− {money(service.discount)}</strong></span><span>Net advance received <strong>{money(servicePaid(service))}</strong></span>{(service.refunds?.length ?? 0) > 0 && <span>Advance refunded <strong>− {money((service.refunds ?? []).reduce((sum, refund) => sum + refund.amount, 0))}</strong></span>}<div className="total-final"><span>Balance due</span><strong>{money(due)}</strong></div></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(service.id)}><CreditCard size={15} /> Record payment</Button>}</div>{service.deliveryOutDate && <div className="panel delivery-note"><CheckCircle2 size={17} /><strong>{service.returnOutcome === "Not repaired" ? "Returned · Not repaired" : "Device returned"}</strong><span>{dateLabel(service.deliveryOutDate)}{service.deliveryOutPerson ? ` · Picked up by ${service.deliveryOutPerson}` : ""}{service.deliveryOutStaff ? ` · Returned by ${service.deliveryOutStaff}` : ""}</span>{service.deliveryRemarks && <small>{service.deliveryRemarks}</small>}</div>}</aside></div>
   </>;
 }
 
@@ -1915,7 +2006,7 @@ function printInvoice(sale: Sale, settings: ShopSettings) {
 function printReceipt(service: ServiceJob, settings: ShopSettings) {
   const popup = window.open("", "_blank", "width=500,height=720");
   if (!popup) { window.alert("Please allow pop-ups to print this receipt."); return; }
-  popup.document.write(`<html><head><title>${escapeHtml(service.serviceNumber)}</title><style>body{font:13px Arial;padding:24px;color:#111}h2{margin-bottom:4px}p{line-height:1.55}.line{border-top:1px dashed #888;margin:18px 0}.sign{margin-top:42px}@media print{@page{size:80mm auto;margin:5mm}}</style></head><body><h2>${escapeHtml(settings.shopName)}</h2><p>${escapeHtml(settings.address)}<br>${escapeHtml(settings.phone)}<br>Service receipt · ${escapeHtml(service.serviceNumber)}<br>In date: ${dateLabel(service.inDate)}</p><div class="line"></div><p><strong>${escapeHtml(service.customerName)}</strong><br>${escapeHtml(service.contactNumber)}<br>${escapeHtml(`${service.brand} ${service.mobileModel}`)}<br>IMEI: ${escapeHtml(service.imei || "—")}</p><p>Reported fault: ${escapeHtml(service.reportedFault)}<br>Condition: ${escapeHtml(service.receivedConditions.join(", "))}</p><div class="line"></div><p>Estimate: ${money(service.serviceAmount - service.discount)}<br>Advance: ${money(paymentTotal(service.payments))}<br>Balance: ${money(Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)))}</p><p>Device passwords and patterns are never printed.</p><p class="sign">Customer acknowledgment __________________</p><script>window.onload=()=>window.print()</script></body></html>`);
+  popup.document.write(`<html><head><title>${escapeHtml(service.serviceNumber)}</title><style>body{font:13px Arial;padding:24px;color:#111}h2{margin-bottom:4px}p{line-height:1.55}.line{border-top:1px dashed #888;margin:18px 0}.sign{margin-top:42px}@media print{@page{size:80mm auto;margin:5mm}}</style></head><body><h2>${escapeHtml(settings.shopName)}</h2><p>${escapeHtml(settings.address)}<br>${escapeHtml(settings.phone)}<br>Service receipt · ${escapeHtml(service.serviceNumber)}<br>In date: ${dateLabel(service.inDate)}</p><div class="line"></div><p><strong>${escapeHtml(service.customerName)}</strong><br>${escapeHtml(service.contactNumber)}<br>${escapeHtml(`${service.brand} ${service.mobileModel}`)}<br>IMEI: ${escapeHtml(service.imei || "—")}</p><p>Reported fault: ${escapeHtml(service.reportedFault)}<br>Condition: ${escapeHtml(service.receivedConditions.join(", "))}</p><div class="line"></div><p>Estimate: ${money(service.serviceAmount - service.discount)}<br>Advance: ${money(servicePaid(service))}<br>Balance: ${money(serviceDue(service))}</p><p>Device passwords and patterns are never printed.</p><p class="sign">Customer acknowledgment __________________</p><script>window.onload=()=>window.print()</script></body></html>`);
   popup.document.close();
 }
 
@@ -1944,8 +2035,8 @@ function downloadServiceReceipt(service: ServiceJob, settings: ShopSettings) {
   pdf.text(`Fault: ${service.reportedFault}`.slice(0, 70), 7, y); y += 7;
   pdf.text(`Condition: ${service.receivedConditions.join(", ")}`.slice(0, 70), 7, y); y += 7; pdf.line(7, y, 73, y); y += 8;
   pdf.text(`Estimate: ${pdfMoney(service.serviceAmount - service.discount)}`, 7, y); y += 6;
-  pdf.text(`Advance: ${pdfMoney(paymentTotal(service.payments))}`, 7, y); y += 6;
-  pdf.text(`Balance: ${pdfMoney(Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)))}`, 7, y); y += 12;
+  pdf.text(`Advance: ${pdfMoney(servicePaid(service))}`, 7, y); y += 6;
+  pdf.text(`Balance: ${pdfMoney(serviceDue(service))}`, 7, y); y += 12;
   pdf.setFontSize(7); pdf.text("Device passwords and patterns are never printed.", 7, y);
   pdf.save(`${service.serviceNumber}.pdf`);
 }
@@ -1961,7 +2052,7 @@ function CustomersPage({ customers, sales, services, search, onSearch, onAdd, se
     const customerServices = services.filter((service) => service.customerId === customer.id)
       .sort((a, b) => (b.createdAt || b.inDate).localeCompare(a.createdAt || a.inDate));
     const outstanding = customerSales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0)
-      + customerServices.reduce((sum, service) => sum + Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)), 0);
+      + customerServices.reduce((sum, service) => sum + serviceDue(service), 0);
     const paymentHistory = [
       ...customerSales.flatMap((sale) => sale.payments.map((payment) => ({ ...payment, reference: sale.invoiceNumber }))),
       ...customerServices.flatMap((service) => service.payments.map((payment) => ({ ...payment, reference: service.serviceNumber }))),
@@ -1976,7 +2067,7 @@ function CustomersPage({ customers, sales, services, search, onSearch, onAdd, se
       const ownSales = sales.filter((sale) => sale.customerId === customer.id);
       const ownServices = services.filter((service) => service.customerId === customer.id);
       const spend = ownSales.reduce((sum, sale) => sum + sale.finalAmount, 0) + ownServices.reduce((sum, service) => sum + service.serviceAmount - service.discount, 0);
-      const due = ownSales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0) + ownServices.reduce((sum, service) => sum + Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)), 0);
+      const due = ownSales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0) + ownServices.reduce((sum, service) => sum + serviceDue(service), 0);
       return <tr key={customer.id}><td><span className="customer-cell"><span className="mini-avatar">{customer.name[0]?.toUpperCase()}</span><span><strong>{customer.name}</strong><small>Since {dateLabel(customer.createdAt)}</small></span></span></td><td>{customer.phone}<small className="table-subtext">{customer.email || ""}</small></td><td>{ownSales.length}</td><td>{ownServices.length}</td><td><strong>{money(spend)}</strong></td><td><strong className={due ? "due-text" : ""}>{money(due)}</strong></td><td><button className="row-action" aria-label={`Open ${customer.name}`} onClick={() => onView(customer.id)}><ArrowRight size={15} /></button><button className="row-action" aria-label={`Edit ${customer.name}`} onClick={() => onEdit(customer)}><Settings size={14} /></button></td></tr>;
     })}</tbody></table></div> : <EmptyState icon={Users} title={search ? "No customers found" : "Meet your first customer"} detail={search ? "Try a different search." : "Customers added during sales or service intake appear here too."} action={!search ? <Button onClick={onAdd}><Plus size={15} /> Add customer</Button> : undefined} />}</div>
   </>;
@@ -2206,6 +2297,7 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
   brand: "",
   mobileModel: "",
   customerNumber: "",
+  fault: "",
   status: "Received" as ServiceStatus,
   receivedCondition: "Good condition",
   deliveryDate: "",
@@ -2224,11 +2316,14 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
     setSaving(true);
     setError("");
     try {
-      await onSave({
+      const draft = {
         ...parsed.data,
+        // Keep the vendor-reported fault with this vendor service record.
+        fault: values.fault.trim(),
         inDate: businessDateTime(parsed.data.inDate),
         deliveryDate: parsed.data.deliveryDate ? businessDateTime(parsed.data.deliveryDate) : undefined,
-      });
+      } as Omit<VendorService, "id" | "createdAt" | "vendorId">;
+      await onSave(draft);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not save this vendor service.");
     } finally {
@@ -2241,6 +2336,7 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
     <FormField label="In date"><input className="input" type="date" value={values.inDate} onChange={(event) => update("inDate", event.target.value)} /></FormField>
     <FormField label="In person"><input className="input" value={values.customerName} onChange={(event) => update("customerName", event.target.value)} /></FormField>
     <FormField label="Customer number"><input className="input" inputMode="tel" value={values.customerNumber} onChange={(event) => update("customerNumber", event.target.value)} /></FormField>
+    <FormField label="Fault"><textarea className="input textarea" value={values.fault} onChange={(event) => update("fault", event.target.value)} placeholder="Describe the device fault or issue" /></FormField>
     <FormField label="Brand"><input className="input" value={values.brand} onChange={(event) => update("brand", event.target.value)} /></FormField>
     <FormField label="Model"><input className="input" value={values.mobileModel} onChange={(event) => update("mobileModel", event.target.value)} /></FormField>
     <FormField label="Status"><select className="input" value={values.status} onChange={(event) => update("status", event.target.value)}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></FormField>
@@ -2312,13 +2408,13 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
   const filteredVendorServices = data.vendorServices.filter((service) => included(service.inDate));
   const salesTotal = filteredSales.reduce((sum, sale) => sum + sale.finalAmount, 0);
   const collected = filteredSales.reduce((sum, sale) => sum + paymentTotal(sale.payments), 0)
-    + filteredServices.reduce((sum, service) => sum + paymentTotal(service.payments), 0);
+    + filteredServices.reduce((sum, service) => sum + servicePaid(service), 0);
   const due = filteredSales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0)
-    + filteredServices.reduce((sum, service) => sum + Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)), 0);
+    + filteredServices.reduce((sum, service) => sum + serviceDue(service), 0);
   const exportCsv = () => {
     const rows = [["Type", "Reference", "Date", "Customer", "Total", "Paid", "Balance", "Status"]];
     filteredSales.forEach((sale) => rows.push(["Sale", sale.invoiceNumber, sale.invoiceDate, sale.customerName, String(sale.finalAmount), String(paymentTotal(sale.payments)), String(Math.max(0, sale.finalAmount - paymentTotal(sale.payments))), statusOf(sale.finalAmount, paymentTotal(sale.payments))]));
-    filteredServices.forEach((service) => rows.push(["Service", service.serviceNumber, service.inDate, service.customerName, String(service.serviceAmount - service.discount), String(paymentTotal(service.payments)), String(Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments))), service.status]));
+    filteredServices.forEach((service) => rows.push(["Service", service.serviceNumber, service.inDate, service.customerName, String(service.serviceAmount - service.discount), String(servicePaid(service)), String(serviceDue(service)), service.status]));
     const csv = rows.map((row) => row.map((field) => `"${field.replaceAll('"', '""')}"`).join(",")).join("\r\n");
     const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); link.download = `ahmobiles-report-${dateInputValue()}.csv`; link.click(); URL.revokeObjectURL(link.href);
   };
@@ -2342,15 +2438,18 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
     const orderedServices = filteredServices.slice()
       .sort((a, b) => (b.createdAt || b.inDate).localeCompare(a.createdAt || a.inDate));
     const serviceTotal = orderedServices.reduce((sum, service) => sum + service.serviceAmount - service.discount, 0);
-    const servicePaid = orderedServices.reduce((sum, service) => sum + paymentTotal(service.payments), 0);
-    const serviceDue = orderedServices.reduce((sum, service) => sum + Math.max(0, service.serviceAmount - service.discount - paymentTotal(service.payments)), 0);
+    const serviceCollected = orderedServices.reduce((sum, service) => sum + servicePaid(service), 0);
+    const serviceDueTotal: number = orderedServices.reduce(
+      (sum, service) => sum + serviceDue(service),
+      0
+    );
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(16);
     pdf.text("Service Data Report", margin, 13);
     pdf.setFont("helvetica", "normal");
     pdf.setFontSize(9);
     pdf.text(`Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`, margin, 20);
-    pdf.text(`Jobs: ${orderedServices.length}  |  Total: ${pdfMoney(serviceTotal)}  |  Paid: ${pdfMoney(servicePaid)}  |  Balance: ${pdfMoney(serviceDue)}`, margin, 26);
+    pdf.text(`Jobs: ${orderedServices.length}  |  Total: ${pdfMoney(serviceTotal)}  |  Paid: ${pdfMoney(serviceCollected)}  |  Balance: ${pdfMoney(serviceDueTotal)}`, margin, 26);
 
     const drawTableHeader = (y: number) => {
       pdf.setFillColor(238, 242, 248);
@@ -2367,7 +2466,7 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
     };
     let y = drawTableHeader(34);
     orderedServices.forEach((service) => {
-      const paid = paymentTotal(service.payments);
+      const paid = servicePaid(service);
       const balance = Math.max(0, service.serviceAmount - service.discount - paid);
       const values = [
         service.serviceNumber,
@@ -2661,6 +2760,30 @@ function DeliveryModal({ service, onCancel, onSave }: {
     } finally { setSaving(false); }
   };
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">SERVICE HANDOVER</span><h2>Mark device as returned?</h2></div><button className="icon-btn" type="button" onClick={onCancel} aria-label="Close"><X size={18} /></button></div><p className="delivery-modal-copy"><strong>{service.serviceNumber}</strong> · {service.customerName}<br />Confirm the handover details before closing this job.</p><div className="modal-fields"><FormField label="Delivery out date"><input className="input" type="date" value={date} onChange={(event) => setDate(event.target.value)} /></FormField><FormField label="Customer picking up"><input className="input" value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Customer name" autoFocus /></FormField><FormField label="Delivery remarks (optional)"><textarea className="input textarea" value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder="Notes about the handover" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} /> Confirm handover</>}</Button></div></form></div>;
+}
+
+function NotRepairedModal({ service, refundable, onCancel, onSave }: {
+  service: ServiceJob; refundable: number; onCancel: () => void;
+  onSave: (details: { deliveryOutDate: string; deliveryOutPerson: string; deliveryRemarks: string; refundAmount: number }) => Promise<void>;
+}) {
+  const [date, setDate] = useState(dateInputValue());
+  const [customerName, setCustomerName] = useState(service.customerName);
+  const [remarks, setRemarks] = useState("Product could not be repaired.");
+  const [refund, setRefund] = useState(String(refundable));
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const amount = Number(refund);
+    if (!customerName.trim()) { setError("Enter the name of the customer receiving the device."); return; }
+    if (!date) { setError("Choose the return date."); return; }
+    if (!Number.isFinite(amount) || amount < 0 || amount > refundable) { setError(`Refund must be between ₹0 and ${money(refundable)}.`); return; }
+    setSaving(true);
+    try { await onSave({ deliveryOutDate: businessDateTime(date), deliveryOutPerson: customerName.trim(), deliveryRemarks: remarks.trim(), refundAmount: Math.round(amount * 100) / 100 }); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not complete the return."); }
+    finally { setSaving(false); }
+  };
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">SERVICE CLOSURE</span><h2>Return without repair</h2></div><button className="icon-btn" type="button" onClick={onCancel} aria-label="Close"><X size={18} /></button></div><p className="delivery-modal-copy"><strong>{service.serviceNumber}</strong> · {service.customerName}<br />Confirm the device handover and refund any advance collected.</p><div className="payment-required-summary"><div><span>Advance received</span><strong>{money(paymentTotal(service.payments))}</strong></div><div><span>Already refunded</span><strong>{money(paymentTotal(service.payments) - refundable)}</strong></div><div className="payment-required-due"><span>Available to refund</span><strong>{money(refundable)}</strong></div></div><div className="modal-fields"><FormField label="Refund amount (₹)"><input className="input" type="number" min="0" step="0.01" max={refundable} value={refund} onChange={(event) => setRefund(event.target.value)} /></FormField><FormField label="Return date"><input className="input" type="date" value={date} onChange={(event) => setDate(event.target.value)} /></FormField><FormField label="Customer receiving device"><input className="input" value={customerName} onChange={(event) => setCustomerName(event.target.value)} /></FormField><FormField label="Remarks (optional)"><textarea className="input textarea" value={remarks} onChange={(event) => setRemarks(event.target.value)} /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button type="submit" variant="danger" disabled={saving}>{saving ? "Saving…" : "Confirm return & refund"}</Button></div></form></div>;
 }
 
 function Pagination({ page, pages, total, pageSize, onPage }: { page: number; pages: number; total: number; pageSize: number; onPage: (page: number) => void }) {

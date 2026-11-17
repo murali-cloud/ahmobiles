@@ -1,5 +1,6 @@
 export type PaymentStatus = "Paid" | "Partially paid" | "Unpaid";
 export type ServiceStatus = "Received" | "In progress" | "Ready" | "Returned";
+export type ServiceRefund = { id: string; amount: number; date: string; notes?: string };
 
 export const EMPLOYEE_MODULES = [
   { key: "overview", label: "Overview" },
@@ -88,6 +89,7 @@ export type VendorService = {
   customerNumber: string;
   status: ServiceStatus;
   receivedCondition: string;
+  fault?: string;
   deliveryDate?: string;
   deliveryCustomer?: string;
   serviceCharge: number;
@@ -140,6 +142,9 @@ export type ServiceJob = {
   discount: number;
   finalAmount: number;
   payments: Payment[];
+  refunds?: ServiceRefund[];
+  returnOutcome?: "Repaired" | "Not repaired";
+  refundAmount?: number; // transient command value; the server stores the refund entry in refunds[]
   readyAt?: string;
   deliveryOutDate?: string;
   deliveryOutPerson?: string;

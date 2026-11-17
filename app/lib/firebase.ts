@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { getApp, getApps, initializeApp, type FirebaseApp } from "firebase/app";
 import {
@@ -408,7 +408,8 @@ export async function changeServiceStatus(
   uid: string,
   recordId: string,
   status: ServiceJob["status"],
-  delivery?: Pick<ServiceJob, "readyAt" | "deliveryOutDate" | "deliveryOutPerson" | "deliveryRemarks">,
+  delivery?: Pick<ServiceJob, "readyAt" | "deliveryOutDate" | "deliveryOutPerson" | "deliveryRemarks">
+    & Partial<Pick<ServiceJob, "returnOutcome" | "refundAmount">>,
 ): Promise<void> {
   await mutateRecord(uid, {
     action: "service-status",
