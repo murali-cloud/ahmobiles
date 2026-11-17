@@ -349,20 +349,29 @@ export default function Workspace() {
     if (firebaseConfigured && user) {
       const current = data.services.find((item) => item.id === service.id);
       if (!current) throw new Error("The service job could not be found.");
-      if (service.payments.length === current.payments.length + 1) {
-        const payment = service.payments.at(-1);
-        if (!payment) throw new Error("The payment details are incomplete.");
-        const newPayment = { amount: payment.amount, date: payment.date, notes: payment.notes };
-        await addPayment(user.shopId, "services", service.id, newPayment);
-      } else if (service.vendorId !== current.vendorId) {
-        await changeServiceVendor(user.shopId, service.id, service.vendorId);
-      } else if (service.status !== current.status) {
+      // A handover is saved immediately after its final payment. Check for a
+      // status transition first so the already-recorded payment is not sent
+      // to the payment endpoint a second time from the handover modal.
+      if (service.status !== current.status) {
         await changeServiceStatus(user.shopId, service.id, service.status, {
           readyAt: service.readyAt,
           deliveryOutDate: service.deliveryOutDate,
           deliveryOutPerson: service.deliveryOutPerson,
           deliveryRemarks: service.deliveryRemarks,
         });
+      } else if (service.payments.length === current.payments.length + 1) {
+        const payment = service.payments.at(-1);
+        if (!payment) throw new Error("The payment details are incomplete.");
+        const newPayment = { amount: payment.amount, date: payment.date, notes: payment.notes };
+        await addPayment(user.shopId, "services", service.id, newPayment);
+        setData((latest) => ({
+          ...latest,
+          services: latest.services.map((item) => item.id === service.id
+            ? { ...item, payments: [...item.payments, payment] }
+            : item),
+        }));
+      } else if (service.vendorId !== current.vendorId) {
+        await changeServiceVendor(user.shopId, service.id, service.vendorId);
       } else {
         throw new Error("Service records can only be changed through status or payment actions.");
       }
@@ -487,13 +496,49 @@ export default function Workspace() {
   };
 
   const changeVendorServiceStatus = useCallback((service: VendorService, status: ServiceStatus) => {
-    const deliveryDate = status === "Returned" && !service.deliveryDate
+    // A vendor service is final once it has been returned. Check the latest
+    // workspace record as well as the row passed by the UI to prevent stale updates.
+    const current = data.vendorServices.find((item) => item.id === service.id) ?? service;
+    if (current.status === "Returned") {
+      notify("This vendor service has already been returned. Its status can no longer be changed.", "error");
+      return;
+    }
+    const deliveryDate = status === "Returned" && !current.deliveryDate
       ? businessDateTime(dateInputValue())
-      : service.deliveryDate;
-    void updateVendorServiceRecord(service, { status, ...(deliveryDate ? { deliveryDate } : {}) })
-      .then(() => notify("Vendor service status updated."))
+      : current.deliveryDate;
+    void updateVendorServiceRecord(current, { status, ...(deliveryDate ? { deliveryDate } : {}) })
+      .then(() => notify(status === "Returned"
+        ? "Vendor service marked as returned. Its status is now locked."
+        : "Vendor service status updated."))
       .catch(notifyFromError);
-  }, [notify, notifyFromError, updateVendorServiceRecord]);
+  }, [data.vendorServices, notify, notifyFromError, updateVendorServiceRecord]);
+
+  const showServiceDeliveryModal = (current: ServiceJob) => {
+    setModal(<DeliveryModal
+      service={current}
+      onCancel={() => setModal(null)}
+      onSave={async (delivery) => {
+        try {
+          await updateService({
+            ...current,
+            ...delivery,
+            status: "Returned",
+            deliveryHistory: [...(current.deliveryHistory ?? []), {
+              date: delivery.deliveryOutDate ?? new Date().toISOString(),
+              person: delivery.deliveryOutPerson ?? "",
+              staff: user?.username ?? "Staff",
+              staffId: user?.uid ?? "",
+              remarks: delivery.deliveryRemarks ?? "",
+            }],
+            deliveryOutStaff: user?.username ?? "Staff",
+            deliveryOutStaffId: user?.uid ?? "",
+          });
+          setModal(null);
+          notify("Device marked as returned.");
+        } catch (reason) { notifyFromError(reason); }
+      }}
+    />);
+  };
 
   const setServiceStatus = (service: ServiceJob, status: ServiceStatus) => {
     const current = data.services.find((item) => item.id === service.id) ?? service;
@@ -520,10 +565,10 @@ export default function Workspace() {
                 <div><span>Customer</span><strong>{current.customerName}</strong></div>
                 <div className="payment-required-due"><span>Amount due</span><strong>{money(due)}</strong></div>
               </div>
-              <div className="payment-required-note"><CheckCircle2 size={16} /><span>Once payment is recorded, you can return to this job and complete the handover.</span></div>
+              <div className="payment-required-note"><CheckCircle2 size={16} /><span>Once the full balance is paid, the handover confirmation will open automatically.</span></div>
               <div className="modal-footer payment-required-actions">
                 <Button variant="secondary" onClick={() => setModal(null)}>Not now</Button>
-                <Button onClick={() => { setModal(null); openPayment("service", current.id); }}><CreditCard size={16} /> Collect payment</Button>
+                <Button onClick={() => { setModal(null); openPayment("service", current.id, true); }}><CreditCard size={16} /> Collect payment</Button>
               </div>
             </div>
             <style>{`@keyframes paymentRequiredIn{from{opacity:0;transform:translateY(18px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}@keyframes paymentRequiredPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.18)}50%{box-shadow:0 0 0 12px rgba(245,158,11,0)}}.payment-required-backdrop{backdrop-filter:blur(7px);background:rgba(15,23,42,.48)}.payment-required-modal{width:min(460px,calc(100vw - 32px));padding:30px;border:1px solid rgba(255,255,255,.75);border-radius:22px;box-shadow:0 28px 90px rgba(15,23,42,.28);animation:paymentRequiredIn .32s cubic-bezier(.2,.8,.2,1) both}.payment-required-icon{width:58px;height:58px;border-radius:18px;display:grid;place-items:center;margin-bottom:18px;color:#b45309;background:linear-gradient(145deg,#fff7df,#ffedb3);animation:paymentRequiredPulse 2s ease-in-out infinite}.payment-required-modal h2{margin:8px 0;font-size:24px;letter-spacing:-.7px;color:#172033}.payment-required-copy{margin:0 0 20px;color:#667085;line-height:1.6}.payment-required-summary{padding:15px 17px;border:1px solid #edf0f5;border-radius:15px;background:#fafbfc}.payment-required-summary>div{display:flex;justify-content:space-between;gap:16px;padding:7px 0;color:#667085;font-size:13px}.payment-required-summary strong{color:#273449;text-align:right}.payment-required-summary .payment-required-due{margin-top:8px;padding-top:13px;border-top:1px solid #e6eaf0;align-items:center}.payment-required-due span{font-weight:600;color:#344054}.payment-required-due strong{font-size:23px;color:#b45309}.payment-required-note{display:flex;gap:9px;align-items:flex-start;margin:16px 0 4px;color:#667085;font-size:12px;line-height:1.5}.payment-required-note svg{flex:none;color:#16a085;margin-top:1px}.payment-required-actions{padding:18px 0 0;margin-top:8px}.payment-required-actions button:last-child{box-shadow:0 7px 18px rgba(37,99,235,.2)}`}</style>
@@ -535,30 +580,7 @@ export default function Workspace() {
         notify("Mark this service job as Ready before handing it back.");
         return;
       }
-      setModal(<DeliveryModal
-        service={current}
-        onCancel={() => setModal(null)}
-        onSave={async (delivery) => {
-          try {
-            await updateService({
-              ...current,
-              ...delivery,
-              status: "Returned",
-              deliveryHistory: [...(current.deliveryHistory ?? []), {
-                date: delivery.deliveryOutDate ?? new Date().toISOString(),
-                person: delivery.deliveryOutPerson ?? "",
-                staff: user?.username ?? "Staff",
-                staffId: user?.uid ?? "",
-                remarks: delivery.deliveryRemarks ?? "",
-              }],
-              deliveryOutStaff: user?.username ?? "Staff",
-              deliveryOutStaffId: user?.uid ?? "",
-            });
-            setModal(null);
-            notify("Device marked as returned.");
-          } catch (reason) { notifyFromError(reason); }
-        }}
-      />);
+      showServiceDeliveryModal(current);
       return;
     }
     void updateService({ ...current, status, readyAt: status === "Ready" ? new Date().toISOString() : current.readyAt })
@@ -634,7 +656,7 @@ export default function Workspace() {
 
   if (!ready || loading) return <AuthLoading />;
 
-  const openPayment = (kind: "sale" | "service", id: string) => {
+  const openPayment = (kind: "sale" | "service", id: string, returnAfterPayment = false) => {
     const record = kind === "sale"
       ? data.sales.find((item) => item.id === id)
       : data.services.find((item) => item.id === id);
@@ -650,10 +672,23 @@ export default function Workspace() {
       onSave={async (amount, notes) => {
         const payment: Payment = { id: newId(), amount, date: new Date().toISOString(), notes };
         try {
-          if (kind === "sale") await updateSale({ ...(record as Sale), payments: [...record.payments, payment] });
-          else await updateService({ ...(record as ServiceJob), payments: [...record.payments, payment] });
-          setModal(null);
-          notify("Payment recorded.");
+          if (kind === "sale") {
+            await updateSale({ ...(record as Sale), payments: [...record.payments, payment] });
+            setModal(null);
+          } else {
+            const service = record as ServiceJob;
+            const updatedService = { ...service, payments: [...service.payments, payment] };
+            await updateService(updatedService);
+            const remaining = Math.max(0, updatedService.serviceAmount - updatedService.discount - paymentTotal(updatedService.payments));
+            if (returnAfterPayment && remaining <= 0 && updatedService.status === "Ready") {
+              notify("Payment completed. Confirm the device handover to finish returning it.");
+              showServiceDeliveryModal(updatedService);
+            } else {
+              setModal(null);
+              notify("Payment recorded.");
+            }
+          }
+          if (kind === "sale") notify("Payment recorded.");
         } catch (reason) {
           notifyFromError(reason);
         }
@@ -2072,7 +2107,7 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
           </div>
         </div>
         {filteredVendorServices.length
-          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}><td><button className="table-primary-link" disabled={!canEdit} onClick={() => onEditService(service)}>{service.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(service.inDate)}</span></td><td>{service.customerName}</td><td><strong>{service.brand} {service.mobileModel}</strong></td><td>{service.customerNumber}</td><td><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit} aria-label={`Update status for ${service.serviceNumber}`} onChange={(event) => onStatusChange(service, event.target.value as ServiceStatus)}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td><td>{service.deliveryCustomer || "—"}</td><td><strong>{money(service.serviceCharge)}</strong></td></tr>)}</tbody></table></div>
+          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}><td><button className="table-primary-link" disabled={!canEdit} onClick={() => onEditService(service)}>{service.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(service.inDate)}</span></td><td>{service.customerName}</td><td><strong>{service.brand} {service.mobileModel}</strong></td><td>{service.customerNumber}</td><td><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned"} aria-label={`Update status for ${service.serviceNumber}`} title={service.status === "Returned" ? "This vendor service has been returned and its status is locked." : undefined} onChange={(event) => onStatusChange(service, event.target.value as ServiceStatus)}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></td><td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td><td>{service.deliveryCustomer || "—"}</td><td><strong>{money(service.serviceCharge)}</strong></td></tr>)}</tbody></table></div>
           : <EmptyState icon={Wrench} title={servicesForVendor.length ? "No matching vendor services" : "No vendor services yet"} detail={servicesForVendor.length ? "Adjust your search or filters to see matching services." : "Add a service here to save it only under this vendor."} action={!servicesForVendor.length && canEdit ? <Button onClick={() => onCreateService(selectedVendor)}><Plus size={15} /> Add service</Button> : undefined} />}
       </div>
     </>;
