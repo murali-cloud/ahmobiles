@@ -1,0 +1,121 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function ownsShop(shopId) {
+      return request.auth != null && request.auth.uid == shopId;
+    }
+
+    function employeeProfilePath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function isActiveEmployee(shopId) {
+      return request.auth != null
+        && request.auth.uid != shopId
+        && exists(employeeProfilePath())
+        && get(employeeProfilePath()).data.role == 'employee'
+        && get(employeeProfilePath()).data.active == true
+        && get(employeeProfilePath()).data.shopId == shopId;
+    }
+
+    function canReadModule(shopId, module) {
+      return ownsShop(shopId)
+        || (isActiveEmployee(shopId)
+          && (get(employeeProfilePath()).data.permissions.get(module, 'none') in ['view', 'edit']
+            || (module in ['sales', 'services', 'customers']
+              && get(employeeProfilePath()).data.permissions.get('overview', 'none') in ['view', 'edit'])
+            || (module == 'services'
+              && get(employeeProfilePath()).data.permissions.get('ready', 'none') in ['view', 'edit'])
+            || (module in ['sales', 'services']
+              && get(employeeProfilePath()).data.permissions.reports in ['view', 'edit'])));
+    }
+
+    function canReadAllServices(shopId) {
+      return ownsShop(shopId)
+        || (isActiveEmployee(shopId)
+          && (get(employeeProfilePath()).data.permissions.get('services', 'none') in ['view', 'edit']
+            || get(employeeProfilePath()).data.permissions.get('overview', 'none') in ['view', 'edit']
+            || get(employeeProfilePath()).data.permissions.get('reports', 'none') in ['view', 'edit']));
+    }
+
+    function canReadServiceRecord(shopId, serviceId) {
+      return canReadAllServices(shopId)
+        || (isActiveEmployee(shopId)
+          && get(employeeProfilePath()).data.permissions.get('ready', 'none') in ['view', 'edit']
+          && get(/databases/$(database)/documents/shops/$(shopId)/services/$(serviceId)).data.status == 'Ready');
+    }
+
+    function canEditModule(shopId, module) {
+      return ownsShop(shopId)
+        || (isActiveEmployee(shopId)
+          && get(employeeProfilePath()).data.permissions.get(module, 'none') == 'edit');
+    }
+
+    match /users/{userId} {
+      allow get: if request.auth != null && request.auth.uid == userId;
+      allow list, write: if false;
+    }
+
+    match /shops/{shopId} {
+      allow read, create, update: if ownsShop(shopId);
+      allow delete: if false;
+
+      match /employees/{employeeId} {
+        allow read: if ownsShop(shopId);
+        allow write: if false;
+      }
+
+      match /customers/{customerId} {
+        allow read: if canReadModule(shopId, 'customers');
+        allow create, update: if canEditModule(shopId, 'customers');
+        allow delete: if false;
+      }
+
+      match /vendors/{vendorId} {
+        allow read: if canReadModule(shopId, 'services');
+        allow write: if false;
+      }
+
+      match /sales/{saleId} {
+        allow read: if canReadModule(shopId, 'sales');
+        allow write: if false;
+      }
+
+      match /services/{serviceId} {
+        allow read: if canReadAllServices(shopId)
+          || (isActiveEmployee(shopId)
+            && get(employeeProfilePath()).data.permissions.get('ready', 'none') in ['view', 'edit']
+            && resource.data.status == 'Ready');
+        allow create, delete: if false;
+        allow update: if canEditModule(shopId, 'services')
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'readyAt', 'deliveryOutDate', 'deliveryOutPerson', 'deliveryRemarks']);
+      }
+
+      match /settings/{settingId} {
+        allow read: if canReadModule(shopId, 'settings');
+        allow create, update: if canEditModule(shopId, 'settings');
+        allow delete: if false;
+      }
+
+      match /payments/{paymentId} {
+        allow read: if ownsShop(shopId)
+          || (resource.data.relatedType == 'SALE' && canReadModule(shopId, 'sales'))
+          || (resource.data.relatedType == 'SERVICE' && canReadServiceRecord(shopId, resource.data.relatedDocumentId));
+        allow write: if false;
+      }
+
+      match /counters/{counterId} {
+        allow read, write: if false;
+      }
+
+      match /activityLogs/{logId} {
+        allow read: if ownsShop(shopId)
+          || (resource.data.relatedType == 'SALE' && canReadModule(shopId, 'sales'))
+          || (resource.data.relatedType == 'SERVICE' && canReadServiceRecord(shopId, resource.data.relatedDocumentId))
+          || (resource.data.relatedType == 'CUSTOMER' && canReadModule(shopId, 'customers'));
+        allow write: if false;
+      }
+    }
+  }
+}

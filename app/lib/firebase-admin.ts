@@ -1,0 +1,104 @@
+import "server-only";
+import { cert, getApps, initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
+import {
+  ADMIN_PERMISSIONS, NO_EMPLOYEE_PERMISSIONS,
+  type EmployeeModule, type EmployeePermissions, type ModuleAccess,
+} from "./types";
+
+export function getAdminApp() {
+  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
+  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  if (!projectId || !clientEmail || !privateKey) {
+    throw new Error("Firebase Admin credentials are missing. Configure the FIREBASE_ADMIN_* server environment variables.");
+  }
+  const existing = getApps().find((app) => app.name === "ahmobiles-admin");
+  return existing ?? initializeApp({
+    credential: cert({ projectId, clientEmail, privateKey }),
+    projectId,
+  }, "ahmobiles-admin");
+}
+
+export async function authenticatedShop(request: Request): Promise<string | null> {
+  const token = request.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1];
+  if (!token) return null;
+  const auth = getAuth(getAdminApp());
+  try {
+    const claims = await auth.verifyIdToken(token);
+    return claims.uid;
+  } catch {
+    return null;
+  }
+}
+
+export type WorkspaceActor = {
+  uid: string;
+  shopId: string;
+  username: string;
+  role: "admin" | "employee";
+  permissions: EmployeePermissions;
+};
+
+async function authenticatedClaims(request: Request) {
+  const token = request.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1];
+  if (!token) return null;
+  try {
+    return await getAuth(getAdminApp()).verifyIdToken(token);
+  } catch {
+    return null;
+  }
+}
+
+export async function authenticatedActor(request: Request): Promise<WorkspaceActor | null> {
+  const claims = await authenticatedClaims(request);
+  if (!claims) return null;
+  const uid = claims.uid;
+
+  const profile = await adminDatabase().doc(`users/${uid}`).get();
+  if (!profile.exists) {
+    return {
+      uid,
+      shopId: uid,
+      username: claims.email?.split("@")[0] || "admin",
+      role: "admin",
+      permissions: ADMIN_PERMISSIONS,
+    };
+  }
+
+  const data = profile.data();
+  if (data?.role !== "employee" || data.active !== true || typeof data.shopId !== "string") return null;
+  return {
+    uid,
+    shopId: data.shopId,
+    username: String(data.username || claims.email?.split("@")[0] || "employee"),
+    role: "employee",
+    permissions: { ...NO_EMPLOYEE_PERMISSIONS, ...data.permissions } as EmployeePermissions,
+  };
+}
+
+export function actorHasAccess(
+  actor: WorkspaceActor,
+  module: EmployeeModule,
+  access: ModuleAccess,
+): boolean {
+  if (actor.role === "admin") return true;
+  const level = actor.permissions[module];
+  if (access === "edit") return level === "edit";
+  if (level === "view" || level === "edit") return true;
+  if (module === "vendors" && (
+    actor.permissions.overview !== "none"
+    || actor.permissions.services !== "none"
+    || actor.permissions.ready !== "none"
+    || actor.permissions.reports !== "none"
+  )) return true;
+  if (actor.permissions.overview !== "none" && ["sales", "services", "customers"].includes(module)) return true;
+  if (module === "services" && actor.permissions.ready !== "none") return true;
+  return (module === "sales" || module === "services")
+    && (actor.permissions.reports === "view" || actor.permissions.reports === "edit");
+}
+
+export function adminDatabase() {
+  return getFirestore(getAdminApp());
+}
