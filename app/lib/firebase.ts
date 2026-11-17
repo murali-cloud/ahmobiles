@@ -373,7 +373,7 @@ export async function createVendorService(
 
 export async function updateVendorService(
   serviceId: string,
-  changes: Partial<Pick<VendorService, "status" | "deliveryDate" | "deliveryCustomer">>,
+  changes: Partial<Pick<VendorService, "status" | "deliveryDate" | "deliveryCustomer" | "serviceCharge" | "returnOutcome">>,
 ): Promise<void> {
   const payload = await vendorApiRequest("/api/vendor-services", "PATCH", { serviceId, ...changes });
   if (!isRecord(payload) || payload.success !== true) {
