@@ -104,11 +104,21 @@ function paymentTotal(payments: Payment[]): number {
   return payments.reduce((sum, payment) => sum + payment.amount, 0);
 }
 
+function serviceRefundTotal(service: ServiceJob): number {
+  return (service.refunds ?? []).reduce((sum, refund) => sum + refund.amount, 0);
+}
+
+function serviceNetRevenue(service: ServiceJob): number {
+  // Unrepaired jobs have no earned service revenue. For other jobs, refunds
+  // reduce the revenue attributed to that service bill.
+  if (service.returnOutcome === "Not repaired") return 0;
+  return Math.max(0, service.serviceAmount - service.discount - serviceRefundTotal(service));
+}
+
 function servicePaid(service: ServiceJob): number {
   // Unrepaired returns are treated as having no payment collected.
   if (service.returnOutcome === "Not repaired") return 0;
-  const refunds = (service.refunds ?? []).reduce((sum, refund) => sum + refund.amount, 0);
-  return Math.max(0, paymentTotal(service.payments) - refunds);
+  return Math.max(0, paymentTotal(service.payments) - serviceRefundTotal(service));
 }
 
 function serviceDue(service: ServiceJob): number {
@@ -1095,10 +1105,10 @@ function RevenueAnalytics({ data, period, onPeriodChange, canViewSales = true, c
     ? data.sales.filter((sale) => isInRevenuePeriod(sale.invoiceDate, period)).reduce((sum, sale) => sum + sale.finalAmount, 0)
     : 0;
   const serviceRevenue = canViewServices
-    ? data.services.filter((service) => isInRevenuePeriod(service.inDate, period)).reduce((sum, service) => sum + service.serviceAmount - service.discount, 0)
+    ? data.services.filter((service) => isInRevenuePeriod(service.inDate, period)).reduce((sum, service) => sum + serviceNetRevenue(service), 0)
     : 0;
   const vendorServiceRevenue = canViewServices
-    ? data.vendorServices.filter((service) => isInRevenuePeriod(service.inDate, period)).reduce((sum, service) => sum + service.serviceCharge, 0)
+    ? data.vendorServices.filter((service) => service.returnOutcome !== "Not repaired" && isInRevenuePeriod(service.inDate, period)).reduce((sum, service) => sum + service.serviceCharge, 0)
     : 0;
   const metrics = [
     { label: "Overall revenue", value: salesRevenue + serviceRevenue + vendorServiceRevenue, icon: ArrowUpRight, accent: "blue" },
@@ -1125,7 +1135,7 @@ function VendorAnalytics({ data, period, maxRows }: {
     return {
       vendor,
       count: records.length,
-      revenue: records.reduce((sum, service) => sum + service.serviceCharge, 0),
+      revenue: records.reduce((sum, service) => sum + (service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge), 0),
     };
   }).sort((a, b) => b.revenue - a.revenue || b.count - a.count || a.vendor.name.localeCompare(b.vendor.name));
   const shown = maxRows ? analytics.slice(0, maxRows) : analytics;
@@ -1149,18 +1159,28 @@ function Dashboard({ data, period, setPeriod, revenuePeriod, setRevenuePeriod, c
 }) {
   const pending = data.services.filter((service) => !["Ready", "Returned"].includes(service.status)).length;
   const readyJobs = data.services.filter((service) => service.status === "Ready");
+  // Refunds follow the selected Revenue analytics period and use the actual
+  // refund date (not the original service intake date).
+  const periodRefunds = data.services.flatMap((service) =>
+    (service.refunds ?? [])
+      .filter((refund) => isInRevenuePeriod(refund.date, revenuePeriod))
+      .map((refund) => ({ customerName: service.customerName, amount: refund.amount })),
+  );
+  const refundAmount = periodRefunds.reduce((sum, refund) => sum + refund.amount, 0);
+  const refundCount = new Set(periodRefunds.map((refund) => refund.customerName)).size;
   const outstanding = data.sales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0)
     + data.services.reduce((sum, service) => sum + serviceDue(service), 0);
   const metrics = [
     { label: "Total service jobs", value: String(data.services.length), icon: ClipboardList, accent: "violet", note: "All-time service jobs" },
     { label: "Pending service jobs", value: String(pending), icon: Clock3, accent: "amber", note: "Received or in progress" },
     { label: "Ready for delivery", value: String(readyJobs.length), icon: CheckCircle2, accent: "green", note: "Awaiting customer pickup" },
+    { label: "Refunds", value: money(refundAmount), icon: CreditCard, accent: "rose", note: `${refundCount} ${refundCount === 1 ? "customer" : "customers"} refunded · ${revenuePeriod}` },
     { label: "Total customers", value: String(data.customers.length), icon: Users, accent: "blue", note: "In your directory" },
     { label: "Outstanding", value: money(outstanding), icon: ArrowUpRight, accent: "rose", note: "Across sales & services" },
   ];
   const visibleMetrics = metrics.filter(({ label }) => {
     if (label === "Total customers") return canViewCustomers;
-    if (["Total service jobs", "Pending service jobs", "Ready for delivery"].includes(label)) return canViewServices;
+    if (["Total service jobs", "Pending service jobs", "Ready for delivery", "Refunds"].includes(label)) return canViewServices;
     return canViewSales || canViewServices;
   });
   const chartData = useMemo(() => period === "Custom"
@@ -1193,6 +1213,7 @@ function Dashboard({ data, period, setPeriod, revenuePeriod, setRevenuePeriod, c
           <div className="panel-heading"><div><h2>Service desk</h2><p>Repair jobs at a glance</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>View all <ArrowRight size={14} /></button>}</div>
           <div className="service-summary">
             {(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <div className="service-count" key={status}><span className={`status-dot ${statusClass(status)}`} /> <span>{status}</span><strong>{data.services.filter((job) => job.status === status).length}</strong></div>)}
+            <div className="service-count"><span className="status-dot status-returned" /> <span>Refund</span><strong>{refundCount}</strong></div>
           </div>
           <div className="panel-divider" />
           <div className="ready-highlight"><div className="ready-icon"><Zap size={18} /></div><div><strong>{readyJobs.length} ready for pickup</strong><span>Let customers know their device is ready.</span></div>{canOpenReady && <button className="circle-arrow" onClick={onSeeReady} aria-label="Open ready for delivery"><ArrowRight size={16} /></button>}</div>
@@ -1207,7 +1228,7 @@ function Dashboard({ data, period, setPeriod, revenuePeriod, setRevenuePeriod, c
           {readyJobs.length === 0 ? <EmptyState icon={CheckCircle2} title="All caught up" detail="Jobs marked ready will appear here." /> :
             <div className="pickup-list">{readyJobs.slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Smartphone size={17} /></span><span className="pickup-info"><strong>{job.customerName}</strong><span>{job.brand} {job.mobileModel} · {job.serviceNumber}</span></span><span className="pickup-balance">{money(Math.max(0, job.serviceAmount - job.discount - servicePaid(job)))}</span></div>)}</div>}
         </section>}
-        {canViewServices && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button>}</div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{job.brand} {job.mobileModel} · {dateLabel(job.inDate)}</span></span><StatusBadge status={job.status} /></div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={canCreateService ? <Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button> : undefined} />}</section>}
+        {canViewServices && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button>}</div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{job.brand} {job.mobileModel} · {dateLabel(job.inDate)}{serviceRefundTotal(job) > 0 ? ` · Refunded ${money(serviceRefundTotal(job))}` : ""}</span></span>{job.returnOutcome === "Not repaired" ? <span className="status-badge status-returned">Refunded</span> : <StatusBadge status={job.status} />}</div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={canCreateService ? <Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button> : undefined} />}</section>}
         {canViewServices && <VendorAnalytics data={data} period={revenuePeriod} maxRows={5} />}
         {canViewCustomers && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recently added customers</h2><p>Your newest customer records</p></div>{canOpenCustomers && <button className="text-link" onClick={onCustomer}>View directory <ArrowRight size={14} /></button>}</div>{data.customers.length ? <div className="pickup-list">{data.customers.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((customer) => <div className="pickup-item" key={customer.id}><span className="mini-avatar">{customer.name[0]?.toUpperCase() ?? "?"}</span><span className="pickup-info"><strong>{customer.name}</strong><span>{customer.phone} · Added {dateLabel(customer.createdAt)}</span></span><Users size={15} className="customer-row-icon" /></div>)}</div> : <EmptyState icon={Users} title="Your directory is ready" detail="Customers added to a bill will show up here." action={canOpenCustomers ? <Button variant="secondary" onClick={onCustomer}><Users size={14} /> View customers</Button> : undefined} />}</section>}
       </div>
@@ -1239,13 +1260,13 @@ function chartForPeriod(data: WorkspaceData, period: "Week" | "Month" | "Year") 
       return period === "Week" ? d.toDateString() === date.toDateString()
         : period === "Month" ? d.getMonth() === date.getMonth() && d.getFullYear() === date.getFullYear()
         : d.getFullYear() === date.getFullYear();
-    }).reduce((sum, item) => sum + item.serviceAmount - item.discount, 0);
+    }).reduce((sum, item) => sum + serviceNetRevenue(item), 0);
     const vendorServices = data.vendorServices.filter((item) => {
       const d = new Date(item.inDate);
       return period === "Week" ? d.toDateString() === date.toDateString()
         : period === "Month" ? d.getMonth() === date.getMonth() && d.getFullYear() === date.getFullYear()
         : d.getFullYear() === date.getFullYear();
-    }).reduce((sum, item) => sum + item.serviceCharge, 0);
+    }).reduce((sum, item) => sum + (item.returnOutcome === "Not repaired" ? 0 : item.serviceCharge), 0);
     return { label: period === "Week" ? date.toLocaleDateString("en-IN", { weekday: "short" })
       : period === "Month" ? date.toLocaleDateString("en-IN", { month: "short" })
       : date.toLocaleDateString("en-IN", { month: "short" }), sales, services, vendorServices };
@@ -1285,13 +1306,13 @@ function chartForCustomRange(data: WorkspaceData, from: string, to: string) {
     const date = service.inDate.slice(0, 10);
     if (date < from || date > to) continue;
     const bucket = totals.get(keyForDate(new Date(`${date}T00:00:00`)));
-    if (bucket) bucket.services += service.serviceAmount - service.discount;
+    if (bucket) bucket.services += serviceNetRevenue(service);
   }
   for (const service of data.vendorServices) {
     const date = service.inDate.slice(0, 10);
     if (date < from || date > to) continue;
     const bucket = totals.get(keyForDate(new Date(`${date}T00:00:00`)));
-    if (bucket) bucket.vendorServices += service.serviceCharge;
+    if (bucket) bucket.vendorServices += service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge;
   }
   return [...totals].map(([key, amounts]) => ({
     label: granularity === "day"
