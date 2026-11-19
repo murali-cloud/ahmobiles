@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "A&H Mobiles | Shop Manager",
+  title: "AH Mobiles | Shop Manager",
   description: "Sales, service and customer management for your mobile shop.",
 };
 

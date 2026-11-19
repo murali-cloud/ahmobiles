@@ -1,4 +1,4 @@
-# A&H Mobiles Shop Manager
+# AHMobiles Shop Manager
 
 A mobile-first Next.js app for mobile-shop sales, repair intake, service tracking,
 customers, payments, reports, and printable invoices.

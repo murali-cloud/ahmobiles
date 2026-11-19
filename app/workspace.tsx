@@ -26,7 +26,7 @@ import { normalizePhoneNumber } from "./lib/phone";
 import {
   DEFAULT_SETTINGS, EMPLOYEE_MODULES, NO_EMPLOYEE_PERMISSIONS, type Customer, type EmployeeAccount,
   type EmployeeModule, type EmployeePermissions, type ModuleAccess, type Payment, type PaymentStatus,
-  type ProductLine, type Sale, type ServiceJob, type ServiceStatus, type ServiceVendor, type VendorService, type ShopSettings, type WorkspaceData, type WorkspaceIdentity,
+  type ProductCategory, type ProductLine, type Sale, type ServiceJob, type ServiceStatus, type ServiceVendor, type VendorService, type ShopSettings, type WorkspaceData, type WorkspaceIdentity,
 } from "./lib/types";
 import { customerSchema, loginSchema, saleSchema, serviceFormSchema, serviceSchema, serviceVendorSchema, vendorServiceFormSchema } from "./lib/validation";
 
@@ -46,6 +46,12 @@ const EMPTY_DATA: WorkspaceData = {
 type ChartPeriod = "Week" | "Month" | "Year" | "Custom";
 type RevenuePeriod = "Today" | "This week" | "This month" | "This year" | "All time";
 const REVENUE_PERIODS: RevenuePeriod[] = ["Today", "This week", "This month", "This year", "All time"];
+
+function deviceLabel(item: { category?: ProductCategory; brand: string; mobileModel?: string; model?: string; productName?: string }): string {
+  if (item.category === "Accessories" && item.productName) return item.productName;
+  const model = item.mobileModel ?? item.model ?? "";
+  return `${item.brand}${model ? ` ${model}` : ""}`.trim();
+}
 
 function money(value: number): string {
   return new Intl.NumberFormat("en-IN", {
@@ -280,11 +286,16 @@ export default function Workspace() {
       return;
     }
     let active = true;
-    setData((current) => ({ ...current, vendors: [], vendorServices: [] }));
     Promise.all([listServiceVendors(), listVendorServices()])
-      .then(([vendors, vendorServices]) => {
-        if (active) setData((current) => ({ ...current, vendors, vendorServices }));
-      })
+  .then(([vendors, vendorServices]) => {
+    if (active) {
+      setData((current) => ({
+        ...current,
+        vendors,
+        vendorServices,
+      }));
+    }
+  })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : "Could not load service vendors.");
       });
@@ -544,23 +555,64 @@ export default function Workspace() {
     />);
   };
 
-  const changeVendorServiceStatus = useCallback((service: VendorService, status: ServiceStatus) => {
-    // A vendor service is final once it has been returned. Check the latest
-    // workspace record as well as the row passed by the UI to prevent stale updates.
-    const current = data.vendorServices.find((item) => item.id === service.id) ?? service;
+  const changeVendorServiceStatus = useCallback(
+  (service: VendorService, status: ServiceStatus) => {
+    const current =
+      data.vendorServices.find((item) => item.id === service.id) ?? service;
+
+    // Prevent changing a service that has already been returned or refunded.
     if (current.status === "Returned" || current.returnOutcome === "Not repaired") {
-      notify("This vendor service has already been returned or refunded. Its status can no longer be changed.", "error");
+      notify(
+        "This vendor service has already been returned or refunded. Its status can no longer be changed.",
+        "error"
+      );
       return;
     }
-    const deliveryDate = status === "Returned" && !current.deliveryDate
-      ? businessDateTime(dateInputValue())
-      : current.deliveryDate;
-    void updateVendorServiceRecord(current, { status, ...(deliveryDate ? { deliveryDate } : {}) })
-      .then(() => notify(status === "Returned"
-        ? "Vendor service marked as returned. Its status is now locked."
-        : "Vendor service status updated."))
+
+    // If status is Returned, require delivery details through a popup.
+    if (status === "Returned") {
+      const vendor = data.vendors.find(
+        (item) => item.id === current.vendorId
+      );
+
+      if (!vendor) {
+        notify("Service vendor could not be found.", "error");
+        return;
+      }
+
+      setModal(
+        <VendorServiceDeliveryModal
+          service={current}
+          vendor={vendor}
+          onClose={() => setModal(null)}
+          onSave={async (delivery) => {
+            await updateVendorServiceRecord(current, {
+              ...delivery,
+              status: "Returned",
+            });
+
+            setModal(null);
+            notify("Vendor service returned successfully. Status is now locked.");
+          }}
+        />
+      );
+
+      return;
+    }
+
+    // Normal status changes (Received, In progress, Ready).
+    void updateVendorServiceRecord(current, { status })
+      .then(() => notify("Vendor service status updated."))
       .catch(notifyFromError);
-  }, [data.vendorServices, notify, notifyFromError, updateVendorServiceRecord]);
+  },
+  [
+    data.vendorServices,
+    data.vendors,
+    notify,
+    notifyFromError,
+    updateVendorServiceRecord,
+  ]
+);
 
   const showServiceDeliveryModal = (current: ServiceJob) => {
     setModal(<DeliveryModal
@@ -898,6 +950,7 @@ export default function Workspace() {
         services={data.services}
         vendorServices={data.vendorServices}
         vendors={data.vendors}
+        settings={data.settings}
         onView={(id) => router.push(`/services/${id}`)}
         onPayment={(id) => openPayment("service", id)}
         onReturn={(service) => setServiceStatus(service, "Returned")}
@@ -917,7 +970,7 @@ export default function Workspace() {
     ? <ServicesPage services={data.services} search={globalSearch} onSearch={setGlobalSearch}
         onCreate={() => router.push("/services/create")} onView={(id) => router.push(`/services/${id}`)}
         onPayment={(id) => openPayment("service", id)} onUpdate={(service) => setServiceStatus(service, service.status)}
-        onVendorChange={assignServiceVendor} canEdit={canEditModule("services")} vendors={data.vendors} />
+        onVendorChange={assignServiceVendor} canEdit={canEditModule("services")} vendors={data.vendors} settings={data.settings} />
     : route === "vendors"
     ? <ServiceVendorsPage
         vendors={data.vendors}
@@ -975,7 +1028,7 @@ export default function Workspace() {
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
         <div className="brand-row">
           <div className="brand-mark"><Smartphone size={19} strokeWidth={2.6} /></div>
-          <span className="brand-name">{data.settings.shopName || "A&H Mobiles"}</span>
+          <span className="brand-name">{data.settings.shopName || "AH Mobiles"}</span>
           <button className="icon-btn sidebar-close" aria-label="Close menu" onClick={() => setMenuOpen(false)}><X size={18} /></button>
         </div>
         <div className="sidebar-divider" role="separator" />
@@ -1041,7 +1094,7 @@ function routeTitle(route: string, subroute: string): string {
 }
 
 function AuthLoading() {
-  return <div className="loading-screen"><div className="loading-brand"><div className="brand-mark"><Smartphone size={19} /></div><strong>A&H Mobiles</strong></div><div className="loading-spinner" /><span>Getting your workspace ready…</span></div>;
+  return <div className="loading-screen"><div className="loading-brand"><div className="brand-mark"><Smartphone size={19} /></div><strong>AH Mobiles</strong></div><div className="loading-spinner" /><span>Getting your workspace ready…</span></div>;
 }
 
 function AuthScreen({ error, disabled = false, onSubmit }: {
@@ -1055,7 +1108,7 @@ function AuthScreen({ error, disabled = false, onSubmit }: {
   });
   return (
     <div className="auth-page">
-      <div className="auth-aside"><div className="auth-brand"><div className="brand-mark"><Smartphone size={19} /></div><strong>A&H Mobiles</strong></div><div className="auth-pitch"><span className="eyebrow">YOUR SHOP, IN SYNC</span><h1>Everything your shop needs.<br /><span>All in one place.</span></h1><p>Keep sales moving, repairs on track, and every customer feeling looked after.</p><div className="auth-points"><span><Check size={15} /> Sales & service billing</span><span><Check size={15} /> Customer & payment history</span><span><Check size={15} /> Reports that make sense</span></div></div><div className="auth-aside-foot">Simple tools. Better business.</div></div>
+      <div className="auth-aside"><div className="auth-brand"><div className="brand-mark"><Smartphone size={19} /></div><strong>AH Mobiles</strong></div><div className="auth-pitch"><span className="eyebrow">YOUR SHOP, IN SYNC</span><h1>Everything your shop needs.<br /><span>All in one place.</span></h1><p>Keep sales moving, repairs on track, and every customer feeling looked after.</p><div className="auth-points"><span><Check size={15} /> Sales & service billing</span><span><Check size={15} /> Customer & payment history</span><span><Check size={15} /> Reports that make sense</span></div></div><div className="auth-aside-foot">Simple tools. Better business.</div></div>
       <div className="auth-main"><form className="auth-form" onSubmit={handleSubmit(({ username, password }) => onSubmit(username, password))}>
         <span className="eyebrow">ADMIN & EMPLOYEE ACCESS</span><h2>Welcome back</h2><p>Sign in with your username or admin email.</p>
         <label className="field-label">Username or admin email<input className="input" type="text" autoComplete="username" placeholder="Username or email" disabled={disabled} {...register("username")} /></label>{errors.username && <span className="field-error">{errors.username.message}</span>}
@@ -1079,11 +1132,11 @@ function PageHeader({ eyebrow, title, description, children }: { eyebrow?: strin
   return <div className="page-heading"><div><div className="eyebrow">{eyebrow ?? "YOUR BUSINESS"}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{children && <div className="heading-actions">{children}</div>}</div>;
 }
 
-function Button({ children, variant = "primary", onClick, type = "button", disabled = false, className = "" }: {
+function Button({ children, variant = "primary", onClick, type = "button", disabled = false, className = "", style }: {
   children: ReactNode; variant?: "primary" | "secondary" | "ghost" | "danger"; onClick?: () => void;
-  type?: "button" | "submit"; disabled?: boolean; className?: string;
+  type?: "button" | "submit"; disabled?: boolean; className?: string; style?: import("react").CSSProperties;
 }) {
-  return <button type={type} onClick={onClick} disabled={disabled} className={`btn btn-${variant} ${className}`}>{children}</button>;
+  return <button type={type} onClick={onClick} disabled={disabled} style={style} className={`btn btn-${variant} ${className}`}>{children}</button>;
 }
 
 function EmptyState({ icon: Icon = ClipboardList, title, detail, action }: { icon?: typeof ClipboardList; title: string; detail: string; action?: ReactNode }) {
@@ -1101,15 +1154,32 @@ function RevenueAnalytics({ data, period, onPeriodChange, canViewSales = true, c
   canViewSales?: boolean;
   canViewServices?: boolean;
 }) {
-  const salesRevenue = canViewSales
-    ? data.sales.filter((sale) => isInRevenuePeriod(sale.invoiceDate, period)).reduce((sum, sale) => sum + sale.finalAmount, 0)
-    : 0;
-  const serviceRevenue = canViewServices
-    ? data.services.filter((service) => isInRevenuePeriod(service.inDate, period)).reduce((sum, service) => sum + serviceNetRevenue(service), 0)
-    : 0;
-  const vendorServiceRevenue = canViewServices
-    ? data.vendorServices.filter((service) => service.returnOutcome !== "Not repaired" && isInRevenuePeriod(service.inDate, period)).reduce((sum, service) => sum + service.serviceCharge, 0)
-    : 0;
+  const periodSales = canViewSales
+    ? data.sales.filter((sale) => isInRevenuePeriod(sale.invoiceDate, period))
+    : [];
+  const periodServices = canViewServices
+    ? data.services.filter((service) => isInRevenuePeriod(service.inDate, period))
+    : [];
+  const periodVendorServices = canViewServices
+    ? data.vendorServices.filter((service) => service.returnOutcome !== "Not repaired" && isInRevenuePeriod(service.inDate, period))
+    : [];
+
+  const salesRevenue = periodSales.reduce((sum, sale) => sum + sale.finalAmount, 0);
+  const serviceRevenue = periodServices.reduce((sum, service) => sum + serviceNetRevenue(service), 0);
+  const vendorServiceRevenue = periodVendorServices.reduce((sum, service) => sum + service.serviceCharge, 0);
+
+  // Complete revenue = money actually received for sales and service jobs.
+  const completeSalesRevenue = periodSales.reduce((sum, sale) => sum + paymentTotal(sale.payments), 0);
+  const completeServiceRevenue = periodServices.reduce((sum, service) => sum + servicePaid(service), 0);
+  const completeRevenue = completeSalesRevenue + completeServiceRevenue;
+
+  // Pending revenue = unpaid invoice and service balances for this period.
+  const pendingSalesRevenue = periodSales.reduce(
+    (sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0,
+  );
+  const pendingServiceRevenue = periodServices.reduce((sum, service) => sum + serviceDue(service), 0);
+  const pendingRevenue = pendingSalesRevenue + pendingServiceRevenue;
+
   const metrics = [
     { label: "Overall revenue", value: salesRevenue + serviceRevenue + vendorServiceRevenue, icon: ArrowUpRight, accent: "blue" },
     ...(canViewSales ? [{ label: "Sales revenue", value: salesRevenue, icon: CreditCard, accent: "violet" }] : []),
@@ -1118,8 +1188,13 @@ function RevenueAnalytics({ data, period, onPeriodChange, canViewSales = true, c
       { label: "Vendor service revenue", value: vendorServiceRevenue, icon: Store, accent: "green" },
     ] : []),
   ];
+
   return <section className="panel revenue-analytics-panel">
     <div className="panel-heading"><div><h2>Revenue analytics</h2><p>Revenue for the selected period</p></div><label className="select-wrap"><span>Period</span><select aria-label="Revenue analytics period" value={period} onChange={(event) => onPeriodChange(event.target.value as RevenuePeriod)}>{REVENUE_PERIODS.map((option) => <option key={option}>{option}</option>)}</select><ChevronDown size={14} /></label></div>
+    {(canViewSales || canViewServices) && <div className="report-metrics revenue-completion-metrics">
+      <div className="panel report-metric"><span className="metric-icon green"><CheckCircle2 size={17} /></span><span>Complete Revenue<strong>{money(completeRevenue)}</strong><small>Payments received · {period}</small></span></div>
+      <div className="panel report-metric"><span className="metric-icon amber"><Clock3 size={17} /></span><span>Pending Revenue<strong>{money(pendingRevenue)}</strong><small>Outstanding balance · {period}</small></span></div>
+    </div>}
     <div className="report-metrics">{metrics.map(({ label, value, icon: Icon, accent }) => <div className="panel report-metric" key={label}><span className={`metric-icon ${accent}`}><Icon size={17} /></span><span>{label}<strong>{money(value)}</strong><small>{period}</small></span></div>)}</div>
   </section>;
 }
@@ -1226,9 +1301,9 @@ function Dashboard({ data, period, setPeriod, revenuePeriod, setRevenuePeriod, c
         {canViewServices && <section className="panel ready-panel">
           <div className="panel-heading"><div><h2>Waiting for pickup</h2><p>Devices ready to go home</p></div>{canOpenReady && <button className="text-link" onClick={onSeeReady}>Open list <ArrowRight size={14} /></button>}</div>
           {readyJobs.length === 0 ? <EmptyState icon={CheckCircle2} title="All caught up" detail="Jobs marked ready will appear here." /> :
-            <div className="pickup-list">{readyJobs.slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Smartphone size={17} /></span><span className="pickup-info"><strong>{job.customerName}</strong><span>{job.brand} {job.mobileModel} · {job.serviceNumber}</span></span><span className="pickup-balance">{money(Math.max(0, job.serviceAmount - job.discount - servicePaid(job)))}</span></div>)}</div>}
+            <div className="pickup-list">{readyJobs.slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Smartphone size={17} /></span><span className="pickup-info"><strong>{job.customerName}</strong><span>{deviceLabel(job)} · {job.serviceNumber}</span></span><span className="pickup-balance">{money(Math.max(0, job.serviceAmount - job.discount - servicePaid(job)))}</span></div>)}</div>}
         </section>}
-        {canViewServices && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button>}</div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{job.brand} {job.mobileModel} · {dateLabel(job.inDate)}{serviceRefundTotal(job) > 0 ? ` · Refunded ${money(serviceRefundTotal(job))}` : ""}</span></span>{job.returnOutcome === "Not repaired" ? <span className="status-badge status-returned">Refunded</span> : <StatusBadge status={job.status} />}</div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={canCreateService ? <Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button> : undefined} />}</section>}
+        {canViewServices && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent service bills</h2><p>Repairs that recently came in</p></div>{canOpenServices && <button className="text-link" onClick={onSeeServices}>See all <ArrowRight size={14} /></button>}</div>{data.services.length ? <div className="pickup-list">{data.services.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((job) => <div className="pickup-item" key={job.id}><span className="device-avatar"><Wrench size={16} /></span><span className="pickup-info"><strong>{job.serviceNumber} · {job.customerName}</strong><span>{deviceLabel(job)} · {dateLabel(job.inDate)}{serviceRefundTotal(job) > 0 ? ` · Refunded ${money(serviceRefundTotal(job))}` : ""}</span></span>{job.returnOutcome === "Not repaired" ? <span className="status-badge status-returned">Refunded</span> : <StatusBadge status={job.status} />}</div>)}</div> : <EmptyState icon={Wrench} title="No service jobs yet" detail="New repair intakes will appear here." action={canCreateService ? <Button variant="secondary" onClick={onCreateService}><Plus size={14} /> Create service job</Button> : undefined} />}</section>}
         {canViewServices && <VendorAnalytics data={data} period={revenuePeriod} maxRows={5} />}
         {canViewCustomers && <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recently added customers</h2><p>Your newest customer records</p></div>{canOpenCustomers && <button className="text-link" onClick={onCustomer}>View directory <ArrowRight size={14} /></button>}</div>{data.customers.length ? <div className="pickup-list">{data.customers.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4).map((customer) => <div className="pickup-item" key={customer.id}><span className="mini-avatar">{customer.name[0]?.toUpperCase() ?? "?"}</span><span className="pickup-info"><strong>{customer.name}</strong><span>{customer.phone} · Added {dateLabel(customer.createdAt)}</span></span><Users size={15} className="customer-row-icon" /></div>)}</div> : <EmptyState icon={Users} title="Your directory is ready" detail="Customers added to a bill will show up here." action={canOpenCustomers ? <Button variant="secondary" onClick={onCustomer}><Users size={14} /> View customers</Button> : undefined} />}</section>}
       </div>
@@ -1336,7 +1411,8 @@ function SalesPage({ sales, search, onSearch, onCreate, onView, onPayment, setti
   const filtered = sales.filter((sale) => {
     const query = search.toLowerCase();
     const paid = paymentTotal(sale.payments);
-    return (!query || `${sale.invoiceNumber} ${sale.customerName} ${sale.contactNumber}`.toLowerCase().includes(query))
+    const productNames = sale.products.map((p) => deviceLabel(p)).join(" ");
+    return (!query || `${sale.invoiceNumber} ${sale.customerName} ${sale.contactNumber} ${productNames}`.toLowerCase().includes(query))
       && (paymentFilter === "All statuses" || statusOf(sale.finalAmount, paid) === paymentFilter)
       && (!from || sale.invoiceDate.slice(0, 10) >= from)
       && (!to || sale.invoiceDate.slice(0, 10) <= to);
@@ -1449,7 +1525,7 @@ function SalesTable({ sales, compact = false, canOpen = true, onView, onPayment,
 function SaleForm({ data, busy, onSubmit, onCancel }: {
   data: WorkspaceData; busy: boolean; onSubmit: (draft: Omit<Sale, "id">) => Promise<Sale | undefined>; onCancel: () => void;
 }) {
-  const [products, setProducts] = useState<ProductLine[]>([{ id: newId(), brand: "", model: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
+  const [products, setProducts] = useState<ProductLine[]>([{ id: newId(), category: "Electronics", brand: "", model: "", productName: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
   const [tax, setTax] = useState(0);
   const [paid, setPaid] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -1471,10 +1547,28 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
   useEffect(() => {
     if (matchingCustomer) setValue("customerName", matchingCustomer.name);
   }, [matchingCustomer, setValue]);
-  const addProduct = () => setProducts((current) => [...current, { id: newId(), brand: "", model: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
+  const addProduct = () => setProducts((current) => [...current, { id: newId(), category: "Electronics", brand: "", model: "", productName: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
   const updateProduct = (id: string, key: keyof ProductLine, value: string | number) => setProducts((current) => current.map((item) => item.id === id ? { ...item, [key]: value } : item));
   const saveDraft = async (form: { customerName: string; contactNumber: string; invoiceDate: string; invoiceNumber: string }, printAfterSave = false) => {
     setFieldErrors({});
+    for (const [index, p] of products.entries()) {
+      const cat = p.category ?? "Electronics";
+      if (cat === "Electronics") {
+        if (!p.brand.trim()) {
+          setFieldErrors({ products: `Please enter a brand for product ${index + 1}.` });
+          return;
+        }
+        if (!p.model.trim()) {
+          setFieldErrors({ products: `Please enter a model for product ${index + 1}.` });
+          return;
+        }
+      } else {
+        if (!p.productName?.trim()) {
+          setFieldErrors({ products: `Please enter a product name for product ${index + 1}.` });
+          return;
+        }
+      }
+    }
     const parsed = saleSchema.safeParse({ ...form, products, discount: 0, tax, amountPaid: paid });
     if (!parsed.success) {
       const nextErrors: Record<string, string> = {};
@@ -1504,7 +1598,13 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
       customerName: customer?.name ?? form.customerName.trim(),
       contactNumber: form.contactNumber.trim(),
       invoiceDate: businessDateTime(form.invoiceDate),
-      products: products.map((item) => ({ ...item })),
+      products: products.map((item) => ({
+        ...item,
+        category: item.category ?? "Electronics",
+        brand: (item.category ?? "Electronics") === "Electronics" ? item.brand.trim() : "",
+        model: (item.category ?? "Electronics") === "Electronics" ? item.model.trim() : "",
+        productName: (item.category ?? "Electronics") === "Accessories" ? item.productName?.trim() : undefined,
+      })),
       subtotal: total,
       discount: 0,
       tax,
@@ -1530,7 +1630,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
           <div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} />{matchingCustomer && <span className="field-hint"><CheckCircle2 size={13} /> Existing customer: {matchingCustomer.name}</span>}</FormField><FormField label="Invoice date"><input className="input" type="date" {...register("invoiceDate")} /></FormField><FormField label="Invoice number" error={errors.invoiceNumber?.message ?? fieldErrors.invoiceNumber}><input className="input" maxLength={120} {...register("invoiceNumber")} /><span className="field-hint">Auto-generated; edit if needed.</span></FormField></div>
         </section>
         <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Products</h2><p>Add one or more devices to this sale.</p></div><Button variant="secondary" onClick={addProduct}><Plus size={15} /> Add product</Button></div>
-          <div className="product-list">{products.map((product, index) => <div className="product-row" key={product.id}><div className="product-row-title"><span>Product {String(index + 1).padStart(2, "0")}</span>{products.length > 1 && <button className="remove-link" type="button" onClick={() => setProducts((items) => items.filter((item) => item.id !== product.id))}><X size={14} /> Remove</button>}</div><div className="form-grid product-fields"><FormField label="Brand"><input className="input" placeholder="Apple" value={product.brand} onChange={(event) => updateProduct(product.id, "brand", event.target.value)} /></FormField><FormField label="Model"><input className="input" placeholder="iPhone 15" value={product.model} onChange={(event) => updateProduct(product.id, "model", event.target.value)} /></FormField><FormField label="IMEI / Serial"><input className="input" placeholder="Optional" value={product.imei} onChange={(event) => updateProduct(product.id, "imei", event.target.value)} /></FormField><FormField label="Qty"><input className="input" type="number" min="1" value={product.quantity} onChange={(event) => updateProduct(product.id, "quantity", Number(event.target.value))} /></FormField><FormField label="Rate (₹)"><input className="input" type="number" min="0" value={product.rate || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "rate", Number(event.target.value))} /></FormField><FormField label="Discount (₹)"><input className="input" type="number" min="0" value={product.discount || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "discount", Number(event.target.value))} /></FormField><div className="line-total"><span>Line total</span><strong>{money(Math.max(0, product.quantity * product.rate - product.discount))}</strong></div></div></div>)}</div>
+          <div className="product-list">{products.map((product, index) => <div className="product-row" key={product.id}><div className="product-row-title"><span>Product {String(index + 1).padStart(2, "0")}</span>{products.length > 1 && <button className="remove-link" type="button" onClick={() => setProducts((items) => items.filter((item) => item.id !== product.id))}><X size={14} /> Remove</button>}</div><div className="form-grid product-fields"><FormField label="Category"><div className="select-wrap category1-select-wrap"><select className="input" value={product.category ?? "Electronics"} onChange={(event) => { const cat = event.target.value as ProductCategory; setProducts((items) => items.map((item) => item.id === product.id ? { ...item, category: cat, brand: "", model: "", productName: "" } : item)); }}><option value="Electronics">Electronics</option><option value="Accessories">Accessories</option></select><ChevronDown size={14} /></div></FormField>{(product.category ?? "Electronics") === "Electronics" ? <><FormField label="Brand"><input className="input" placeholder="Apple" value={product.brand} onChange={(event) => updateProduct(product.id, "brand", event.target.value)} /></FormField><FormField label="Model"><input className="input" placeholder="iPhone 15" value={product.model} onChange={(event) => updateProduct(product.id, "model", event.target.value)} /></FormField></> : <div className="product-span-2"><FormField label="Product name"><input className="input" placeholder="e.g. Tempered glass, Charger…" value={product.productName ?? ""} onChange={(event) => updateProduct(product.id, "productName", event.target.value)} /></FormField></div>}<FormField label="IMEI / Serial"><input className="input" placeholder="Optional" value={product.imei} onChange={(event) => updateProduct(product.id, "imei", event.target.value)} /></FormField><FormField label="Qty"><input className="input" type="number" min="1" value={product.quantity} onChange={(event) => updateProduct(product.id, "quantity", Number(event.target.value))} /></FormField><FormField label="Rate (₹)"><input className="input" type="number" min="0" value={product.rate || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "rate", Number(event.target.value))} /></FormField><FormField label="Discount (₹)"><input className="input" type="number" min="0" value={product.discount || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "discount", Number(event.target.value))} /></FormField><div className="line-total"><span>Line total</span><strong>{money(Math.max(0, product.quantity * product.rate - product.discount))}</strong></div></div></div>)}</div>
           {fieldErrors.products && <span className="field-error">{fieldErrors.products}</span>}
         </section>
         <section className="panel form-panel"><div className="form-section-head"><span className="step-number">03</span><div><h2>Payment details</h2><p>Record the amount received today.</p></div></div><div className="form-grid two-col"><FormField label="Amount paid (₹)" error={fieldErrors.amountPaid}><input className="input" type="number" min="0" value={paid || ""} placeholder="0" onChange={(event) => setPaid(Number(event.target.value))} /></FormField><FormField label="Tax (₹), optional"><input className="input" type="number" min="0" value={tax || ""} placeholder="0" onChange={(event) => setTax(Number(event.target.value))} /></FormField></div></section>
@@ -1572,10 +1672,15 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
 }) {
   const generatedServiceNumber = nextInvoiceNumber("services", settings.servicePrefix || "SRV", services);
   const [conditions, setConditions] = useState<string[]>([]);
+  const [otherCondition, setOtherCondition] = useState("");
   const [serviceNumber, setServiceNumber] = useState(generatedServiceNumber);
   const [amount, setAmount] = useState(0);
   const [advance, setAdvance] = useState(0);
   const [formError, setFormError] = useState("");
+  const [serviceCategory, setServiceCategory] = useState<ProductCategory>("Electronics");
+  const [serviceBrand, setServiceBrand] = useState("");
+  const [serviceModel, setServiceModel] = useState("");
+  const [serviceProductName, setServiceProductName] = useState("");
   const { register, handleSubmit, formState: { errors } } = useForm({
     resolver: zodResolver(serviceFormSchema),
     defaultValues: { customerName: "", contactNumber: "", inDate: dateInputValue(), brand: "", mobileModel: "", imei: "", reportedFault: "", technicianNotes: "", remarks: "", serviceAmount: 0, discount: 0 },
@@ -1599,19 +1704,37 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
       setFormError("Advance cannot be greater than the service charge.");
       return;
     }
+    if (serviceCategory === "Electronics") {
+      if (!serviceBrand.trim()) { setFormError("Enter a brand."); return; }
+      if (!serviceModel.trim()) { setFormError("Enter a model."); return; }
+    } else {
+      if (!serviceProductName.trim()) { setFormError("Enter a product name."); return; }
+    }
 
     const parsed = serviceSchema.safeParse({
-    ...form,
-    receivedConditions: conditions,
-    serviceAmount: amount,
-    discount: 0,
+      ...form,
+      category: serviceCategory,
+      brand: serviceCategory === "Electronics" ? serviceBrand.trim() : "",
+      mobileModel: serviceCategory === "Electronics" ? serviceModel.trim() : "",
+      productName: serviceCategory === "Accessories" ? serviceProductName.trim() : undefined,
+      receivedConditions: conditions.map((condition) =>
+        condition === "Other" && otherCondition.trim()
+          ? `Other: ${otherCondition.trim()}`
+          : condition
+      ),
+      serviceAmount: amount,
+      discount: 0,
     });
     if (!parsed.success) { setFormError(parsed.error.issues[0]?.message ?? "Check the form details."); return; }
     const customer = customers.find((item) =>
       normalizePhoneNumber(item.phone) === normalizePhoneNumber(form.contactNumber));
     const saved = await onSubmit({
       customerId: customer?.id ?? "", customerName: form.customerName.trim(), contactNumber: form.contactNumber.trim(),
-      inDate: businessDateTime(form.inDate), brand: form.brand.trim(), mobileModel: form.mobileModel.trim(),
+      inDate: businessDateTime(form.inDate),
+      category: serviceCategory,
+      brand: serviceCategory === "Electronics" ? serviceBrand.trim() : "",
+      mobileModel: serviceCategory === "Electronics" ? serviceModel.trim() : "",
+      productName: serviceCategory === "Accessories" ? serviceProductName.trim() : undefined,
       imei: form.imei.trim(), reportedFault: form.reportedFault.trim(), technicianNotes: form.technicianNotes.trim(),
       receivedConditions: conditions,
       remarks: form.remarks.trim(),
@@ -1620,14 +1743,14 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
       discount: 0,
       finalAmount: final,
       payments: advance > 0
-  ? [{
-      id: newId(),
-      amount: advance,
-      date: new Date().toISOString(),
-      notes: "Advance payment",
-    }]
-  : [],
-createdAt: new Date().toISOString(),
+        ? [{
+            id: newId(),
+            amount: advance,
+            date: new Date().toISOString(),
+            notes: "Advance payment",
+          }]
+        : [],
+      createdAt: new Date().toISOString(),
       serviceNumber: trimmedServiceNumber === generatedServiceNumber ? undefined : trimmedServiceNumber,
     });
     if (saved && printAfterSave) printReceipt(saved, settings);
@@ -1638,7 +1761,45 @@ createdAt: new Date().toISOString(),
     <PageHeader eyebrow="SERVICE DESK · NEW JOB" title="New service job" description="Record the device condition and repair request at intake."><Button variant="secondary" onClick={onCancel}><ArrowLeft size={15} /> Back to services</Button></PageHeader>
     <form className="billing-layout" onSubmit={submit} noValidate><div className="billing-main">
       <section className="panel form-panel"><div className="form-section-head"><span className="step-number">01</span><div><h2>Customer & intake</h2><p>Contact details and when the device arrived.</p></div></div><div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} /></FormField><FormField label="In date"><input className="input" type="date" {...register("inDate")} /></FormField><FormField label="Service bill number"><input className="input" required maxLength={120} value={serviceNumber} onChange={(event) => setServiceNumber(event.target.value)} /><span className="field-hint">Auto-generated; edit if needed.</span></FormField></div></section>
-      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Device details</h2><p>Identify the device and document its condition.</p></div></div><div className="form-grid two-col"><FormField label="Brand"><input className="input" placeholder="Samsung" {...register("brand")} /></FormField><FormField label="Model"><input className="input" placeholder="Galaxy S24" {...register("mobileModel")} /></FormField><FormField label="IMEI (optional)"><input className="input" placeholder="15-digit IMEI" {...register("imei")} /></FormField><FormField label="Reported fault" error={errors.reportedFault?.message}><input className="input" required placeholder="Describe the issue" {...register("reportedFault")} /></FormField></div><div className="condition-label">Received condition <span>Select all that apply</span></div><div className="condition-list">{CONDITIONS.map((condition) => <label key={condition} className={`condition-chip ${conditions.includes(condition) ? "checked" : ""}`}><input type="checkbox" checked={conditions.includes(condition)} onChange={() => toggleCondition(condition)} /><span>{conditions.includes(condition) && <Check size={12} />}</span>{condition}</label>)}</div><div className="form-grid two-col textareas"><FormField label="Technician notes"><textarea className="input textarea" placeholder="Notes for the repair team" {...register("technicianNotes")} /></FormField><FormField label="Additional remarks"><textarea className="input textarea" placeholder="Any other details about intake" {...register("remarks")} /></FormField></div></section>
+      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Device details</h2><p>Identify the device and document its condition.</p></div></div><div className="form-grid two-col"><FormField label="Category"><div className="select-wrap category-select-wrap"><select className="input" value={serviceCategory} onChange={(event) => { setServiceCategory(event.target.value as ProductCategory); setServiceBrand(""); setServiceModel(""); setServiceProductName(""); }}><option value="Electronics">Electronics</option><option value="Accessories">Accessories</option></select><ChevronDown size={14} /></div></FormField>{serviceCategory === "Electronics" ? <><FormField label="Brand"><input className="input" placeholder="Samsung" value={serviceBrand} onChange={(event) => setServiceBrand(event.target.value)} /></FormField><FormField label="Model"><input className="input" placeholder="Galaxy S24" value={serviceModel} onChange={(event) => setServiceModel(event.target.value)} /></FormField></> : <FormField label="Product name"><input className="input" placeholder="e.g. Tempered glass, Charger…" value={serviceProductName} onChange={(event) => setServiceProductName(event.target.value)} /></FormField>}<FormField label="IMEI (optional)"><input className="input" placeholder="15-digit IMEI" {...register("imei")} /></FormField><FormField label="Reported fault" error={errors.reportedFault?.message}><input className="input" required placeholder="Describe the issue" {...register("reportedFault")} /></FormField></div><div className="condition-label">
+  Received condition <span>Select all that apply</span>
+</div>
+
+<div className="condition-list">
+  {CONDITIONS.map((condition) => (
+    <label
+      key={condition}
+      className={`condition-chip ${conditions.includes(condition) ? "checked" : ""}`}
+    >
+      <input
+        type="checkbox"
+        checked={conditions.includes(condition)}
+        onChange={() => {
+          toggleCondition(condition);
+
+          if (condition === "Other" && conditions.includes("Other")) {
+            setOtherCondition("");
+          }
+        }}
+      />
+      <span>{conditions.includes(condition) && <Check size={12} />}</span>
+      {condition}
+    </label>
+  ))}
+</div>
+
+{conditions.includes("Other") && (
+  <div style={{ marginTop: 12 }}>
+    <input
+      className="input"
+      type="text"
+      value={otherCondition}
+      onChange={(event) => setOtherCondition(event.target.value)}
+      placeholder="Please specify other condition..."
+      autoFocus
+    />
+  </div>
+)}<div className="form-grid two-col textareas"><FormField label="Technician notes"><textarea className="input textarea" placeholder="Notes for the repair team" {...register("technicianNotes")} /></FormField><FormField label="Additional remarks"><textarea className="input textarea" placeholder="Any other details about intake" {...register("remarks")} /></FormField></div></section>
       <section className="panel form-panel">
     <div className="form-section-head">
       <span className="step-number">03</span>
@@ -1696,11 +1857,12 @@ createdAt: new Date().toISOString(),
   </>;
 }
 
-function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, onPayment, onUpdate, onVendorChange, canEdit }: {
+function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, onPayment, onUpdate, onVendorChange, canEdit, settings }: {
   services: ServiceJob[]; search: string; onSearch: (value: string) => void; onCreate: () => void;
   vendors: ServiceVendor[];
   onView: (id: string) => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; canEdit: boolean;
   onVendorChange: (service: ServiceJob, vendorId?: string) => void;
+  settings?: ShopSettings;
 }) {
   const router = useRouter();
   const [statusFilter, setStatusFilter] = useState("All statuses");
@@ -1710,7 +1872,7 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
   const [sortBy, setSortBy] = useState("date-desc");
   const [page, setPage] = useState(1);
   const vendorNames = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
-  const filtered = services.filter((service) => (!search || `${service.serviceNumber} ${service.customerName} ${service.contactNumber} ${service.brand} ${service.mobileModel} ${service.imei} ${vendorNames.get(service.vendorId ?? "") ?? ""}`.toLowerCase().includes(search.toLowerCase()))
+  const filtered = services.filter((service) => (!search || `${service.serviceNumber} ${service.customerName} ${service.contactNumber} ${deviceLabel(service)} ${service.imei} ${vendorNames.get(service.vendorId ?? "") ?? ""}`.toLowerCase().includes(search.toLowerCase()))
     && (statusFilter === "All statuses"
       || (statusFilter === "Refund" ? service.returnOutcome === "Not repaired" : service.status === statusFilter))
     && (paymentFilter === "All payments"
@@ -1773,7 +1935,7 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
         service.serviceNumber,
         dateLabel(service.inDate),
         service.customerName,
-        `${service.brand} ${service.mobileModel}`.trim(),
+        deviceLabel(service),
         service.contactNumber,
         vendorNames.get(service.vendorId ?? "") || "—",
         service.status,
@@ -1781,7 +1943,11 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
         service.deliveryOutPerson || "—",
         pdfMoney(service.returnOutcome === "Not repaired" ? 0 : service.serviceAmount),
       ];
-      const lines = values.map((value, index) => pdf.splitTextToSize(value || "—", columns[index].width - 2) as string[]);
+      const lines = values.map((value, index) => {
+  const column = columns[index];
+  const width = column?.width ?? 25;
+  return pdf.splitTextToSize(String(value || "—"), Math.max(5, width - 2)) as string[];
+});
       const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
       if (y + rowHeight > pageHeight - 12) {
         pdf.addPage();
@@ -1789,9 +1955,16 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
       }
       let x = margin;
       lines.forEach((cellLines, index) => {
-        pdf.text(cellLines, x + 1, y, { maxWidth: columns[index].width - 2 });
-        x += columns[index].width;
-      });
+  const column = columns[index];
+
+  if (!column) return;
+
+  pdf.text(cellLines, x + 1, y, {
+    maxWidth: Math.max(5, column.width - 2),
+  });
+
+  x += column.width;
+});
       y += rowHeight;
       pdf.setDrawColor(225, 230, 238);
       pdf.line(margin, y - 2, margin + columns.reduce((sum, column) => sum + column.width, 0), y - 2);
@@ -1808,13 +1981,13 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
     <PageHeader eyebrow="REPAIR & CARE" title="Service desk" description="Track every repair from intake to handover."><Button variant="secondary" onClick={exportServicesPdf}><Download size={15} /> Export PDF</Button><Button variant="secondary" onClick={() => router.push("/services/ready")}><CheckCircle2 size={15} /> Ready for pickup</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> New service job</Button>}</PageHeader>
     <div className="service-kpis">{(["Received", "In progress", "Ready", "Returned", "Refund"] as const).map((status) => <div className="service-kpi" key={status}><span className={`status-dot ${statusClass(status)}`} /><span>{status}</span><strong>{status === "Refund" ? services.filter((item) => item.returnOutcome === "Not repaired").length : services.filter((item) => item.status === status && item.returnOutcome !== "Not repaired").length}</strong></div>)}</div>
     <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search bill, customer, model or IMEI…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned", "Refund"] as const).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label><label className="select-wrap"><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All payments</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option><option>Refund</option></select><ChevronDown size={14} /></label><div className="date-range compact-date-range"><label>From<input aria-label="Services from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /></label><label>To<input aria-label="Services to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /></label></div><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
-      {filtered.length ? <ServiceJobsTable services={filtered.slice((page - 1) * pageSize, page * pageSize)} vendors={vendors} onView={onView} onPayment={onPayment} onUpdate={onUpdate} onVendorChange={onVendorChange} canEdit={canEdit} /> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
+      {filtered.length ? <ServiceJobsTable services={filtered.slice((page - 1) * pageSize, page * pageSize)} vendors={vendors} onView={onView} onPayment={onPayment} onUpdate={onUpdate} onVendorChange={onVendorChange} canEdit={canEdit} settings={settings} /> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
       {filtered.length > 0 && <Pagination page={page} pages={pages} total={filtered.length} pageSize={pageSize} onPage={setPage} />}
     </div>
   </>;
 }
 
-function ServiceJobsTable({ services, vendors, onView, onPayment, onUpdate, onVendorChange, canEdit }: {
+function ServiceJobsTable({ services, vendors, onView, onPayment, onUpdate, onVendorChange, canEdit, settings }: {
   services: ServiceJob[];
   vendors: ServiceVendor[];
   onView: (id: string) => void;
@@ -1822,15 +1995,16 @@ function ServiceJobsTable({ services, vendors, onView, onPayment, onUpdate, onVe
   onUpdate: (service: ServiceJob) => void;
   onVendorChange: (service: ServiceJob, vendorId?: string) => void;
   canEdit: boolean;
+  settings?: ShopSettings;
 }) {
   const sortedVendors = vendors.slice().sort((a, b) => a.name.localeCompare(b.name));
   return <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{services.map((job) => {
     const due = Math.max(0, job.serviceAmount - job.discount - servicePaid(job));
-    return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(job.inDate)}</span></td><td><strong>{job.customerName}</strong></td><td><strong>{job.brand} {job.mobileModel}</strong></td><td>{job.contactNumber}</td><td>{job.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select>}</td><td><span className="muted-cell">{job.deliveryOutDate ? dateLabel(job.deliveryOutDate) : "—"}</span></td><td>{job.deliveryOutPerson || "—"}</td><td><strong>{money(job.returnOutcome === "Not repaired" ? 0 : job.serviceAmount)}</strong></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}</td></tr>;
+    return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(job.inDate)}</span></td><td><strong>{job.customerName}</strong></td><td><strong>{deviceLabel(job)}</strong></td><td>{job.contactNumber}</td><td>{job.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select>}</td><td><span className="muted-cell">{job.deliveryOutDate ? dateLabel(job.deliveryOutDate) : "—"}</span></td><td>{job.deliveryOutPerson || "—"}</td><td><strong>{money(job.returnOutcome === "Not repaired" ? 0 : job.serviceAmount)}</strong></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}{settings && <button className="row-action" aria-label="Thermal invoice" title="Thermal invoice" onClick={() => printServiceInvoice(job, settings, true)}><Printer size={15} /></button>}</td></tr>;
   })}</tbody></table></div>;
 }
 
-function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onReturn, onVendorStatusChange, canEditPayment, canReturn, canViewAllServices }: {
+function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onReturn, onVendorStatusChange, canEditPayment, canReturn, canViewAllServices, settings }: {
   services: ServiceJob[];
   vendorServices: VendorService[];
   vendors: ServiceVendor[];
@@ -1841,6 +2015,7 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
   canEditPayment: boolean;
   canReturn: boolean;
   canViewAllServices: boolean;
+  settings?: ShopSettings;
 }) {
   const router = useRouter();
   const [activeList, setActiveList] = useState<"services" | "vendor">("services");
@@ -1878,7 +2053,7 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
         const due = Math.max(0, job.serviceAmount - job.discount - servicePaid(job));
         return <article className="ready-card" key={job.id}>
           <div className="ready-card-top"><span className="ready-device-icon"><Smartphone size={20} /></span><StatusBadge status="Ready" /><button className="more-btn" aria-label="More actions" onClick={() => onView(job.id)}><MoreHorizontal size={18} /></button></div>
-          <div className="ready-card-id">{job.serviceNumber}</div><h2>{job.brand} {job.mobileModel}</h2><p>{job.reportedFault}</p>
+          <div className="ready-card-id">{job.serviceNumber}</div><h2>{deviceLabel(job)}</h2><p>{job.reportedFault}</p>
           <div className="ready-customer"><span className="mini-avatar amber-avatar">{job.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{job.customerName}</strong><small>{job.contactNumber}</small></span></div>
           <div className="ready-card-meta"><span>Ready since <strong>{dateLabel(job.readyAt ?? job.inDate)}</strong></span><span>Balance <strong className={due ? "balance-due" : "balance-paid"}>{money(due)}</strong></span></div>
           {(canEditPayment || canReturn) && <div className="ready-card-actions">
@@ -1893,7 +2068,7 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
           ? `91${digits.slice(1)}`
           : digits;
 
-      const message = `Hello ${job.customerName}! Your ${job.brand} ${job.mobileModel} is ready for delivery at A&H Mobiles. Service Bill: ${job.serviceNumber}. Please visit our shop to collect your device. Thank you!`;
+      const message = `Hello ${job.customerName}! Your ${deviceLabel(job)} is ready for delivery at AH Mobiles. Service Bill: ${job.serviceNumber}. Please visit our shop to collect your device. Thank you!`;
 
       window.open(
         `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(message)}`,
@@ -1904,6 +2079,12 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
   >
     <MessageCircle size={15} /> WhatsApp
   </Button>
+
+  {settings && (
+    <Button variant="secondary" onClick={() => printServiceInvoice(job, settings, true)}>
+      <Printer size={14} /> Thermal bill
+    </Button>
+  )}
 
   {canEditPayment && due > 0 && (
     <Button variant="secondary" onClick={() => onPayment(job.id)}>
@@ -1949,10 +2130,17 @@ function ServiceDetail({ service, vendor, settings, onBack, onPayment, onUpdate,
   if (!service) return <NotFound title="Service job not found" backLabel="Back to services" onBack={onBack} />;
   const due = serviceDue(service);
   return <>
-    <PageHeader eyebrow="SERVICE JOB" title={service.serviceNumber} description={`${service.brand} ${service.mobileModel} · Received ${dateLabel(service.inDate)}`}><Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> All services</Button><Button variant="secondary" onClick={() => downloadServiceReceipt(service, settings)}><Download size={15} /> Download PDF</Button><Button variant="secondary" onClick={() => printReceipt(service, settings)}><Printer size={15} /> Print receipt</Button>{canEdit && service.status !== "Returned" && <Button variant="danger" onClick={() => onNotRepaired(service)}>Not repaired · Return device</Button>}</PageHeader>
+    <PageHeader eyebrow="SERVICE JOB" title={service.serviceNumber} description={`${deviceLabel(service)} · Received ${dateLabel(service.inDate)}`}>
+      <Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> All services</Button>
+      <Button variant="secondary" onClick={() => downloadServiceReceipt(service, settings)}><Download size={15} /> Download PDF</Button>
+      <Button variant="secondary" onClick={() => printReceipt(service, settings)}><FileText size={15} /> Intake receipt</Button>
+      <Button onClick={() => printServiceInvoice(service, settings, true)}><Printer size={15} /> Thermal bill</Button>
+      <Button variant="secondary" onClick={() => printServiceInvoice(service, settings, false)}><Printer size={15} /> A4 invoice</Button>
+      {canEdit && service.status !== "Returned" && <Button variant="danger" onClick={() => onNotRepaired(service)}>Not repaired · Return device</Button>}
+    </PageHeader>
     <div className="detail-grid"><div className="detail-main">
       <section className="panel detail-panel"><div className="panel-heading"><div><h2>Repair status</h2><p>Track the job from intake through handover.</p></div><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned"} onChange={(event) => onUpdate({ ...service, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : service.readyAt, deliveryOutDate: event.target.value === "Returned" ? new Date().toISOString() : service.deliveryOutDate })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></div><div className="status-timeline">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status, index) => { const completed = (["Received", "In progress", "Ready", "Returned"] as string[]).indexOf(service.status) >= index; return <div className={`timeline-step ${completed ? "done" : ""}`} key={status}><span>{completed ? <Check size={13} /> : index + 1}</span><strong>{status}</strong>{index < 3 && <i />}</div>; })}</div></section>
-      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Device & issue</h2><p>What came in, and what needs attention.</p></div></div><div className="detail-fields"><DetailField label="Customer" value={service.customerName} /><DetailField label="Contact number" value={service.contactNumber} /><DetailField label="Device" value={`${service.brand} ${service.mobileModel}`} /><DetailField label="Service vendor" value={vendor ? `${vendor.name} · ${vendor.phone}` : "Not assigned"} /><DetailField label="IMEI" value={service.imei || "Not recorded"} /><DetailField label="Reported fault" value={service.reportedFault} /><DetailField label="Received condition" value={service.receivedConditions.join(", ") || "Not specified"} /><DetailField label="Technician notes" value={service.technicianNotes || "—"} /><DetailField label="Additional remarks" value={service.remarks || "—"} /></div></section>
+      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Device & issue</h2><p>What came in, and what needs attention.</p></div></div><div className="detail-fields"><DetailField label="Customer" value={service.customerName} /><DetailField label="Contact number" value={service.contactNumber} /><DetailField label={service.category === "Accessories" ? "Product" : "Device"} value={deviceLabel(service)} /><DetailField label="Service vendor" value={vendor ? `${vendor.name} · ${vendor.phone}` : "Not assigned"} /><DetailField label="IMEI" value={service.imei || "Not recorded"} /><DetailField label="Reported fault" value={service.reportedFault} /><DetailField label="Received condition" value={service.receivedConditions.join(", ") || "Not specified"} /><DetailField label="Technician notes" value={service.technicianNotes || "—"} /><DetailField label="Additional remarks" value={service.remarks || "—"} /></div></section>
       <section className="panel detail-panel"><div className="panel-heading">
   <div>
     <h2>Payment history</h2>
@@ -1960,7 +2148,7 @@ function ServiceDetail({ service, vendor, settings, onBack, onPayment, onUpdate,
   </div>
 </div>{(service.payments.length || (service.refunds?.length ?? 0)) ? <div className="payment-history">{service.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}{(service.refunds ?? []).map((refund) => <div className="payment-row" key={refund.id}><span className="payment-method-icon"><ArrowLeft size={15} /></span><span><strong>Returned to customer</strong><small>{dateLabel(refund.date)}{refund.notes ? ` · ${refund.notes}` : ""}</small></span><strong className="returned-amount" style={{ color: "#dc2626" }}>− {money(refund.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section>
       {(service.deliveryHistory?.length ?? 0) > 0 && <section className="panel detail-panel"><div className="panel-heading"><div><h2>Delivery history</h2><p>Recorded handovers for this device.</p></div></div><div className="payment-history">{service.deliveryHistory?.slice().reverse().map((entry, index) => <div className="payment-row" key={`${entry.date}-${index}`}><span className="payment-method-icon"><CheckCircle2 size={15} /></span><span><strong>Handed over to customer</strong><small>{dateLabel(entry.date)} · Picked up by {entry.person}{entry.staff ? ` · Returned by ${entry.staff}` : ""}{entry.remarks ? ` · ${entry.remarks}` : ""}</small></span></div>)}</div></section>}
-    </div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service balance</strong><small>{service.returnOutcome === "Not repaired" ? "Refund" : service.status}</small></span></div><div className="total-lines"><span>Service amount <strong>{money(service.returnOutcome === "Not repaired" ? 0 : service.serviceAmount)}</strong></span><span>Discount <strong>− {money(service.discount)}</strong></span><span>Net advance received <strong>{money(servicePaid(service))}</strong></span>{(service.refunds?.length ?? 0) > 0 && <span>Advance refunded <strong>− {money((service.refunds ?? []).reduce((sum, refund) => sum + refund.amount, 0))}</strong></span>}<div className="total-final"><span>Balance due</span><strong>{money(due)}</strong></div></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(service.id)}><CreditCard size={15} /> Record payment</Button>}</div>{service.deliveryOutDate && <div className="panel delivery-note"><CheckCircle2 size={17} /><strong>{service.returnOutcome === "Not repaired" ? "Returned · Not repaired" : "Device returned"}</strong><span>{dateLabel(service.deliveryOutDate)}{service.deliveryOutPerson ? ` · Picked up by ${service.deliveryOutPerson}` : ""}{service.deliveryOutStaff ? ` · Returned by ${service.deliveryOutStaff}` : ""}</span>{service.deliveryRemarks && <small>{service.deliveryRemarks}</small>}</div>}</aside></div>
+    </div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon amber-icon"><Wrench size={17} /></span><span><strong>Service balance</strong><small>{service.returnOutcome === "Not repaired" ? "Refund" : service.status}</small></span></div><div className="total-lines"><span>Service amount <strong>{money(service.returnOutcome === "Not repaired" ? 0 : service.serviceAmount)}</strong></span><span>Discount <strong>− {money(service.discount)}</strong></span><span>Net advance received <strong>{money(servicePaid(service))}</strong></span>{(service.refunds?.length ?? 0) > 0 && <span>Advance refunded <strong>− {money((service.refunds ?? []).reduce((sum, refund) => sum + refund.amount, 0))}</strong></span>}<div className="total-final"><span>Balance due</span><strong>{money(due)}</strong></div></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(service.id)}><CreditCard size={15} /> Record payment</Button>}<Button variant="secondary" className="btn-full" style={{ marginTop: 8 }} onClick={() => printServiceInvoice(service, settings, true)}><Printer size={15} /> Print thermal bill</Button></div>{service.deliveryOutDate && <div className="panel delivery-note"><CheckCircle2 size={17} /><strong>{service.returnOutcome === "Not repaired" ? "Returned · Not repaired" : "Device returned"}</strong><span>{dateLabel(service.deliveryOutDate)}{service.deliveryOutPerson ? ` · Picked up by ${service.deliveryOutPerson}` : ""}{service.deliveryOutStaff ? ` · Returned by ${service.deliveryOutStaff}` : ""}</span>{service.deliveryRemarks && <small>{service.deliveryRemarks}</small>}</div>}</aside></div>
   </>;
 }
 
@@ -1986,7 +2174,7 @@ function InvoicePreview({ sale, settings }: { sale: Sale; settings: ShopSettings
       <div className="invoice-label"><strong>INVOICE</strong><span>{sale.invoiceNumber}</span><small>{dateLabel(sale.invoiceDate)}</small></div>
     </div>
     <div className="invoice-customer"><span>BILLED TO</span><strong>{sale.customerName}</strong><small>{sale.contactNumber}</small></div>
-    <div className="table-scroll"><table className="invoice-table"><thead><tr><th>ITEM</th><th>IMEI / SERIAL</th><th>QTY</th><th>RATE</th><th>DISCOUNT</th><th>AMOUNT</th></tr></thead><tbody>{sale.products.map((product) => <tr key={product.id}><td><strong>{product.brand} {product.model}</strong></td><td>{product.imei || "—"}</td><td>{product.quantity}</td><td>{money(product.rate)}</td><td>{money(product.discount)}</td><td><strong>{money(product.quantity * product.rate - product.discount)}</strong></td></tr>)}</tbody></table></div>
+    <div className="table-scroll"><table className="invoice-table"><thead><tr><th>ITEM</th><th>IMEI / SERIAL</th><th>QTY</th><th>RATE</th><th>DISCOUNT</th><th>AMOUNT</th></tr></thead><tbody>{sale.products.map((product) => <tr key={product.id}><td><strong>{deviceLabel(product)}</strong></td><td>{product.imei || "—"}</td><td>{product.quantity}</td><td>{money(product.rate)}</td><td>{money(product.discount)}</td><td><strong>{money(product.quantity * product.rate - product.discount)}</strong></td></tr>)}</tbody></table></div>
     <div className="invoice-totals"><span>Subtotal <strong>{money(sale.subtotal)}</strong></span><span>Discount <strong>− {money(sale.discount)}</strong></span><span>Tax <strong>{money(sale.tax)}</strong></span><span className="invoice-grand">Invoice total <strong>{money(sale.finalAmount)}</strong></span><span>Paid <strong>{money(paymentTotal(sale.payments))}</strong></span><span>Balance due <strong>{money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></span></div>
     <div className="invoice-footer-note">{settings.invoiceFooter}</div><div className="invoice-signatures"><span>Customer signature</span><span>Authorized signature</span></div>
   </div>;
@@ -2014,7 +2202,7 @@ function downloadInvoice(sale: Sale, settings: ShopSettings) {
   y += 11; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8.5);
   sale.products.forEach((product) => {
     if (y > 250) { pdf.addPage(); y = 22; }
-    pdf.text(`${product.brand} ${product.model}`.slice(0, 38), 18, y);
+    pdf.text(deviceLabel(product).slice(0, 38), 18, y);
     pdf.text(product.imei || "—", 92, y);
     pdf.text(String(product.quantity), 137, y);
     pdf.text(pdfMoney(product.rate), 151, y);
@@ -2034,8 +2222,8 @@ function printInvoice(sale: Sale, settings: ShopSettings) {
   if (!popup) { window.alert("Please allow pop-ups to print this invoice."); return; }
   const thermal = settings.invoicePaperSize === "Thermal";
   const rows = sale.products.map((item) => thermal
-    ? `<tr><td>${escapeHtml(`${item.brand} ${item.model}`)}<small>IMEI: ${escapeHtml(item.imei || "—")}</small></td><td>${item.quantity}</td><td>${money(item.quantity * item.rate - item.discount)}</td></tr>`
-    : `<tr><td>${escapeHtml(`${item.brand} ${item.model}`)}</td><td>${escapeHtml(item.imei || "—")}</td><td>${item.quantity}</td><td>${money(item.rate)}</td><td>${money(item.discount)}</td><td>${money(item.quantity * item.rate - item.discount)}</td></tr>`).join("");
+    ? `<tr><td>${escapeHtml(deviceLabel(item))}<small>IMEI: ${escapeHtml(item.imei || "—")}</small></td><td>${item.quantity}</td><td>${money(item.quantity * item.rate - item.discount)}</td></tr>`
+    : `<tr><td>${escapeHtml(deviceLabel(item))}</td><td>${escapeHtml(item.imei || "—")}</td><td>${item.quantity}</td><td>${money(item.rate)}</td><td>${money(item.discount)}</td><td>${money(item.quantity * item.rate - item.discount)}</td></tr>`).join("");
   const headers = thermal
     ? "<th>PRODUCT</th><th>QTY</th><th>TOTAL</th>"
     : "<th>PRODUCT</th><th>IMEI</th><th>QTY</th><th>RATE</th><th>DISCOUNT</th><th>TOTAL</th>";
@@ -2050,7 +2238,205 @@ function printInvoice(sale: Sale, settings: ShopSettings) {
 function printReceipt(service: ServiceJob, settings: ShopSettings) {
   const popup = window.open("", "_blank", "width=500,height=720");
   if (!popup) { window.alert("Please allow pop-ups to print this receipt."); return; }
-  popup.document.write(`<html><head><title>${escapeHtml(service.serviceNumber)}</title><style>body{font:13px Arial;padding:24px;color:#111}h2{margin-bottom:4px}p{line-height:1.55}.line{border-top:1px dashed #888;margin:18px 0}.sign{margin-top:42px}@media print{@page{size:80mm auto;margin:5mm}}</style></head><body><h2>${escapeHtml(settings.shopName)}</h2><p>${escapeHtml(settings.address)}<br>${escapeHtml(settings.phone)}<br>Service receipt · ${escapeHtml(service.serviceNumber)}<br>In date: ${dateLabel(service.inDate)}</p><div class="line"></div><p><strong>${escapeHtml(service.customerName)}</strong><br>${escapeHtml(service.contactNumber)}<br>${escapeHtml(`${service.brand} ${service.mobileModel}`)}<br>IMEI: ${escapeHtml(service.imei || "—")}</p><p>Reported fault: ${escapeHtml(service.reportedFault)}<br>Condition: ${escapeHtml(service.receivedConditions.join(", "))}</p><div class="line"></div><p>Estimate: ${money(service.serviceAmount - service.discount)}<br>Advance: ${money(servicePaid(service))}<br>Balance: ${money(serviceDue(service))}</p><p>Device passwords and patterns are never printed.</p><p class="sign">Customer acknowledgment __________________</p><script>window.onload=()=>window.print()</script></body></html>`);
+  popup.document.write(`<html><head><title>${escapeHtml(service.serviceNumber)}</title><style>body{font:13px Arial;padding:24px;color:#111}h2{margin-bottom:4px}p{line-height:1.55}.line{border-top:1px dashed #888;margin:18px 0}.sign{margin-top:42px}@media print{@page{size:80mm auto;margin:5mm}}</style></head><body><h2>${escapeHtml(settings.shopName)}</h2><p>${escapeHtml(settings.address)}<br>${escapeHtml(settings.phone)}<br>Service receipt · ${escapeHtml(service.serviceNumber)}<br>In date: ${dateLabel(service.inDate)}</p><div class="line"></div><p><strong>${escapeHtml(service.customerName)}</strong><br>${escapeHtml(service.contactNumber)}<br>${escapeHtml(deviceLabel(service))}<br>IMEI: ${escapeHtml(service.imei || "—")}</p><p>Reported fault: ${escapeHtml(service.reportedFault)}<br>Condition: ${escapeHtml(service.receivedConditions.join(", "))}</p><div class="line"></div><p>Estimate: ${money(service.serviceAmount - service.discount)}<br>Advance: ${money(servicePaid(service))}<br>Balance: ${money(serviceDue(service))}</p><p>Device passwords and patterns are never printed.</p><p class="sign">Customer acknowledgment __________________</p><script>window.onload=()=>window.print()</script></body></html>`);
+  popup.document.close();
+}
+
+function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceThermal?: boolean) {
+  const thermal = forceThermal ?? (settings.invoicePaperSize === "Thermal");
+  const popup = window.open("", "_blank", thermal ? "width=480,height=720" : "width=900,height=720");
+  if (!popup) { window.alert("Please allow pop-ups to print this invoice."); return; }
+
+  const total = service.returnOutcome === "Not repaired" ? 0 : service.serviceAmount - service.discount;
+  const paid = servicePaid(service);
+  const due = serviceDue(service);
+  const logo = settings.logoDataUrl ? `<img class="shop-logo" src="${escapeHtml(settings.logoDataUrl)}" alt="">` : "";
+  const gstin = settings.gstin ? `<div class="muted">GSTIN: ${escapeHtml(settings.gstin)}</div>` : "";
+
+  const paymentRows = (service.payments && service.payments.length > 0)
+    ? `<div class="payments-box"><div class="payments-title">PAYMENTS RECEIVED</div>${service.payments.map((p) => `<div class="pay-line"><span>${dateLabel(p.date)}${p.notes ? ` (${escapeHtml(p.notes)})` : ""}</span><strong>${money(p.amount)}</strong></div>`).join("")}</div>`
+    : "";
+
+  const thermalStyles = `
+    * { box-sizing: border-box; }
+    body { font: 12px/1.35 'Courier New', Courier, monospace, Arial, sans-serif; color: #000; width: 70mm; margin: 0 auto; padding: 4px 0; }
+    .text-center { text-align: center; }
+    .head { text-align: center; margin-bottom: 6px; }
+    .shop-logo { width: 44px; height: 44px; object-fit: contain; margin: 0 auto 4px; display: block; }
+    h2 { font-size: 16px; margin: 2px 0; font-weight: bold; letter-spacing: -0.3px; }
+    .muted { color: #222; font-size: 11px; line-height: 1.3; }
+    .divider { border-top: 1px dashed #000; margin: 6px 0; }
+    .inv-title { font-size: 14px; font-weight: bold; text-align: center; letter-spacing: 0.5px; margin: 4px 0; text-transform: uppercase; }
+    .meta-row { display: flex; justify-content: space-between; font-size: 11px; margin: 2px 0; }
+    .meta-row strong { font-weight: bold; }
+    .item-block { margin: 6px 0; }
+    .item-name { font-size: 13px; font-weight: bold; }
+    .item-detail { font-size: 11px; color: #111; margin-top: 2px; }
+    table { width: 100%; border-collapse: collapse; margin: 6px 0; }
+    th { text-align: left; font-size: 10px; border-bottom: 1px solid #000; padding: 3px 0; text-transform: uppercase; }
+    td { padding: 4px 0; font-size: 11px; vertical-align: top; }
+    .totals { margin: 6px 0; }
+    .totals p { display: flex; justify-content: space-between; margin: 3px 0; font-size: 12px; }
+    .totals p.total { font-size: 13px; font-weight: bold; border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 4px 0; margin: 5px 0; }
+    .balance-tag { font-size: 12px; font-weight: bold; text-align: center; padding: 4px; margin: 6px 0; border: 1px solid #000; }
+    .payments-box { margin: 6px 0; font-size: 10.5px; border-top: 1px dashed #888; padding-top: 4px; }
+    .payments-title { font-weight: bold; font-size: 10px; margin-bottom: 3px; }
+    .pay-line { display: flex; justify-content: space-between; margin: 2px 0; }
+    .footer-note { font-size: 10px; text-align: center; margin: 8px 0 4px; color: #333; }
+    .sign { display: flex; justify-content: space-between; margin-top: 24px; font-size: 10px; }
+    @media print { @page { size: 80mm auto; margin: 4mm; } body { width: 70mm; margin: 0; } }
+  `;
+
+  const a4Styles = `
+    * { box-sizing: border-box; }
+    body { font: 13px/1.5 Arial, sans-serif; color: #111; padding: 32px; max-width: 800px; margin: 0 auto; }
+    .head { display: flex; justify-content: space-between; border-bottom: 1px solid #ddd; padding-bottom: 18px; margin-bottom: 18px; }
+    .shop { display: flex; align-items: flex-start; gap: 12px; }
+    .shop-logo { width: 48px; height: 48px; object-fit: contain; }
+    h2 { font-size: 20px; margin: 0 0 4px; }
+    .muted { color: #666; font-size: 12px; }
+    .meta-block { text-align: right; }
+    .meta-block h2 { font-size: 18px; color: #222; }
+    .bill-to { display: flex; justify-content: space-between; background: #fafbfc; border: 1px solid #edf0f5; border-radius: 8px; padding: 14px 18px; margin-bottom: 18px; }
+    table { width: 100%; border-collapse: collapse; margin: 18px 0; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e5e9f0; font-size: 13px; }
+    th { font-size: 11px; text-transform: uppercase; color: #666; background: #f8fafc; }
+    aside { margin-left: auto; width: 280px; margin-top: 12px; }
+    aside p { display: flex; justify-content: space-between; margin: 6px 0; }
+    aside p.total { font-weight: bold; font-size: 16px; border-top: 2px solid #333; padding-top: 8px; margin-top: 8px; }
+    .balance-tag { font-size: 13px; font-weight: bold; text-align: right; margin-top: 6px; color: #0d7a5f; }
+    .payments-box { margin-top: 14px; padding: 10px; background: #fafbfc; border-radius: 6px; border: 1px solid #edf0f5; }
+    .payments-title { font-weight: bold; font-size: 11px; color: #555; margin-bottom: 6px; }
+    .pay-line { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+    .footer-note { margin-top: 24px; color: #555; font-size: 12px; }
+    .sign { display: flex; justify-content: space-between; margin-top: 48px; color: #444; }
+    @media print { @page { size: A4; margin: 16mm; } body { padding: 0; } }
+  `;
+
+  popup.document.write(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Service Invoice - ${escapeHtml(service.serviceNumber)}</title>
+  <style>${thermal ? thermalStyles : a4Styles}</style>
+</head>
+<body>
+  ${thermal ? `
+    <div class="head">
+      ${logo}
+      <h2>${escapeHtml(settings.shopName || "AH Mobiles")}</h2>
+      ${settings.address ? `<div class="muted">${escapeHtml(settings.address)}</div>` : ""}
+      ${settings.phone ? `<div class="muted">Phone: ${escapeHtml(settings.phone)}</div>` : ""}
+      ${gstin}
+    </div>
+    <div class="divider"></div>
+    <div class="inv-title">SERVICE INVOICE</div>
+    <div class="meta-row"><span>Bill No:</span><strong>${escapeHtml(service.serviceNumber)}</strong></div>
+    <div class="meta-row"><span>Date:</span><span>${dateLabel(service.inDate)}</span></div>
+    ${service.deliveryOutDate ? `<div class="meta-row"><span>Delivered:</span><span>${dateLabel(service.deliveryOutDate)}</span></div>` : ""}
+    <div class="meta-row"><span>Status:</span><strong>${escapeHtml(service.returnOutcome === "Not repaired" ? "Not repaired" : service.status)}</strong></div>
+    <div class="divider"></div>
+    <div class="meta-row"><span>Customer:</span><strong>${escapeHtml(service.customerName)}</strong></div>
+    <div class="meta-row"><span>Contact:</span><span>${escapeHtml(service.contactNumber)}</span></div>
+    ${service.deliveryOutPerson ? `<div class="meta-row"><span>Picked by:</span><span>${escapeHtml(service.deliveryOutPerson)}</span></div>` : ""}
+    <div class="divider"></div>
+    <div class="item-block">
+      <div class="item-name">${escapeHtml(deviceLabel(service))}</div>
+      ${service.imei ? `<div class="item-detail">IMEI: ${escapeHtml(service.imei)}</div>` : ""}
+      <div class="item-detail">Fault: ${escapeHtml(service.reportedFault)}</div>
+    </div>
+    <div class="divider"></div>
+    <div class="totals">
+      <p><span>Service charge:</span> <strong>${money(service.serviceAmount)}</strong></p>
+      ${service.discount > 0 ? `<p><span>Discount:</span> <strong>− ${money(service.discount)}</strong></p>` : ""}
+      <p class="total"><span>TOTAL:</span> <strong>${money(total)}</strong></p>
+      <p><span>Advance / Paid:</span> <strong>${money(paid)}</strong></p>
+      <p><span>Balance due:</span> <strong>${money(due)}</strong></p>
+    </div>
+    <div class="balance-tag">${due <= 0 ? "PAID IN FULL" : `BALANCE DUE: ${money(due)}`}</div>
+    ${paymentRows}
+    ${settings.invoiceFooter ? `<div class="footer-note">${escapeHtml(settings.invoiceFooter)}</div>` : ""}
+    <div class="sign">
+      <span>Customer sign</span>
+      <span>Authorized sign</span>
+    </div>
+  ` : `
+    <div class="head">
+      <div class="shop">
+        ${logo}
+        <div>
+          <h2>${escapeHtml(settings.shopName || "AH Mobiles")}</h2>
+          ${settings.address ? `<div class="muted">${escapeHtml(settings.address)}</div>` : ""}
+          ${settings.phone ? `<div class="muted">Phone: ${escapeHtml(settings.phone)}</div>` : ""}
+          ${gstin}
+        </div>
+      </div>
+      <div class="meta-block">
+        <h2>SERVICE INVOICE</h2>
+        <strong>${escapeHtml(service.serviceNumber)}</strong>
+        <div class="muted">Date: ${dateLabel(service.inDate)}</div>
+        ${service.deliveryOutDate ? `<div class="muted">Delivered: ${dateLabel(service.deliveryOutDate)}</div>` : ""}
+      </div>
+    </div>
+
+    <div class="bill-to">
+      <div>
+        <div class="muted">BILLED TO:</div>
+        <strong>${escapeHtml(service.customerName)}</strong>
+        <div>${escapeHtml(service.contactNumber)}</div>
+      </div>
+      <div>
+        <div class="muted">JOB DETAILS:</div>
+        <div><strong>Status: ${escapeHtml(service.returnOutcome === "Not repaired" ? "Returned · Not repaired" : service.status)}</strong></div>
+        ${service.deliveryOutPerson ? `<div class="muted">Handed over to: ${escapeHtml(service.deliveryOutPerson)}</div>` : ""}
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>DEVICE / PRODUCT</th>
+          <th>CATEGORY</th>
+          <th>REPORTED FAULT</th>
+          <th style="text-align:right">SERVICE AMOUNT</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <strong>${escapeHtml(deviceLabel(service))}</strong>
+            ${service.imei ? `<div class="muted">IMEI: ${escapeHtml(service.imei)}</div>` : ""}
+          </td>
+          <td>${escapeHtml(service.category ?? "Electronics")}</td>
+          <td>${escapeHtml(service.reportedFault)}</td>
+          <td style="text-align:right"><strong>${money(service.serviceAmount)}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <aside>
+      <p><span>Service charge:</span> <strong>${money(service.serviceAmount)}</strong></p>
+      ${service.discount > 0 ? `<p><span>Discount:</span> <strong>− ${money(service.discount)}</strong></p>` : ""}
+      <p class="total"><span>Total amount:</span> <strong>${money(total)}</strong></p>
+      <p><span>Amount paid:</span> <strong>${money(paid)}</strong></p>
+      <p><span>Balance due:</span> <strong>${money(due)}</strong></p>
+      <div class="balance-tag">${due <= 0 ? "✓ FULLY PAID" : `BALANCE DUE: ${money(due)}`}</div>
+    </aside>
+
+    ${paymentRows}
+
+    ${settings.invoiceFooter ? `<p class="footer-note">${escapeHtml(settings.invoiceFooter)}</p>` : ""}
+
+    <div class="sign">
+      <span>Customer signature</span>
+      <span>Authorized signature</span>
+    </div>
+  `}
+  <script>
+    window.onload = function() { window.print(); };
+  </script>
+</body>
+</html>`);
   popup.document.close();
 }
 
@@ -2075,7 +2461,7 @@ function downloadServiceReceipt(service: ServiceJob, settings: ShopSettings) {
   pdf.text(`In date: ${dateLabel(service.inDate)}`, 7, y); y += 5; pdf.line(7, y, 73, y); y += 8;
   pdf.setFont("helvetica", "bold"); pdf.setFontSize(9); pdf.text(service.customerName.slice(0, 35), 7, y); y += 6;
   pdf.setFont("helvetica", "normal"); pdf.setFontSize(8); pdf.text(service.contactNumber, 7, y); y += 6;
-  pdf.text(`${service.brand} ${service.mobileModel}`.slice(0, 34), 7, y); y += 6; pdf.text(`IMEI: ${service.imei || "—"}`, 7, y); y += 8;
+  pdf.text(deviceLabel(service).slice(0, 34), 7, y); y += 6; pdf.text(`IMEI: ${service.imei || "—"}`, 7, y); y += 8;
   pdf.text(`Fault: ${service.reportedFault}`.slice(0, 70), 7, y); y += 7;
   pdf.text(`Condition: ${service.receivedConditions.join(", ")}`.slice(0, 70), 7, y); y += 7; pdf.line(7, y, 73, y); y += 8;
   pdf.text(`Estimate: ${pdfMoney(service.serviceAmount - service.discount)}`, 7, y); y += 6;
@@ -2101,19 +2487,218 @@ function CustomersPage({ customers, sales, services, search, onSearch, onAdd, se
       ...customerSales.flatMap((sale) => sale.payments.map((payment) => ({ ...payment, reference: sale.invoiceNumber }))),
       ...customerServices.flatMap((service) => service.payments.map((payment) => ({ ...payment, reference: service.serviceNumber }))),
     ].sort((a, b) => b.date.localeCompare(a.date));
-    return <><PageHeader eyebrow="CUSTOMER PROFILE" title={customer.name} description={`Customer since ${dateLabel(customer.createdAt)}`}><Button variant="secondary" onClick={() => onEdit(customer)}><Pencil size={14} /> Edit customer</Button><Button variant="secondary" onClick={() => onView("")}><ArrowLeft size={15} /> All customers</Button></PageHeader><div className="customer-profile-head"><span className="customer-profile-avatar">{customer.name[0]?.toUpperCase()}</span><div><h2>{customer.name}</h2><span>{customer.phone}{customer.email ? ` · ${customer.email}` : ""}</span></div><div className="customer-profile-stats"><span>Sales<strong>{customerSales.length}</strong></span><span>Service jobs<strong>{customerServices.length}</strong></span><span>Outstanding<strong>{money(outstanding)}</strong></span></div></div><div className="panel table-panel"><div className="panel-heading"><div><h2>Sales history</h2><p>Invoices connected to this customer.</p></div></div>{customerSales.length ? <SalesTable sales={customerSales} /> : <div className="quiet-empty">No sales recorded for this customer.</div>}</div><div className="panel table-panel customer-services"><div className="panel-heading"><div><h2>Service history</h2><p>Repair jobs connected to this customer.</p></div></div>{customerServices.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL</th><th>DEVICE</th><th>REPORTED FAULT</th><th>STATUS</th><th>DATE</th></tr></thead><tbody>{customerServices.map((service) => <tr key={service.id}><td>{service.serviceNumber}</td><td>{service.brand} {service.mobileModel}</td><td>{service.reportedFault}</td><td><StatusBadge status={service.status} /></td><td>{dateLabel(service.inDate)}</td></tr>)}</tbody></table></div> : <div className="quiet-empty">No service jobs recorded for this customer.</div>}</div><div className="panel table-panel customer-services"><div className="panel-heading"><div><h2>Payment history</h2><p>All recorded payments across this customer&apos;s invoices.</p></div></div>{paymentHistory.length ? <div className="payment-history">{paymentHistory.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>{payment.reference}</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded for this customer.</div>}</div></>;
+    return <><PageHeader eyebrow="CUSTOMER PROFILE" title={customer.name} description={`Customer since ${dateLabel(customer.createdAt)}`}><Button variant="secondary" onClick={() => onEdit(customer)}><Pencil size={14} /> Edit customer</Button><Button variant="secondary" onClick={() => onView("")}><ArrowLeft size={15} /> All customers</Button></PageHeader><div className="customer-profile-head"><span className="customer-profile-avatar">{customer.name[0]?.toUpperCase()}</span><div><h2>{customer.name}</h2><span>{customer.phone}{customer.email ? ` · ${customer.email}` : ""}</span></div><div className="customer-profile-stats"><span>Sales<strong>{customerSales.length}</strong></span><span>Service jobs<strong>{customerServices.length}</strong></span><span>Outstanding<strong>{money(outstanding)}</strong></span></div></div><div className="panel table-panel"><div className="panel-heading"><div><h2>Sales history</h2><p>Invoices connected to this customer.</p></div></div>{customerSales.length ? <SalesTable sales={customerSales} /> : <div className="quiet-empty">No sales recorded for this customer.</div>}</div><div className="panel table-panel customer-services"><div className="panel-heading"><div><h2>Service history</h2><p>Repair jobs connected to this customer.</p></div></div>{customerServices.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL</th><th>DEVICE</th><th>REPORTED FAULT</th><th>STATUS</th><th>DATE</th></tr></thead><tbody>{customerServices.map((service) => <tr key={service.id}><td>{service.serviceNumber}</td><td>{deviceLabel(service)}</td><td>{service.reportedFault}</td><td><StatusBadge status={service.status} /></td><td>{dateLabel(service.inDate)}</td></tr>)}</tbody></table></div> : <div className="quiet-empty">No service jobs recorded for this customer.</div>}</div><div className="panel table-panel customer-services"><div className="panel-heading"><div><h2>Payment history</h2><p>All recorded payments across this customer&apos;s invoices.</p></div></div>{paymentHistory.length ? <div className="payment-history">{paymentHistory.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>{payment.reference}</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded for this customer.</div>}</div></>;
   }
-  const filtered = customers.filter((customer) => !search || `${customer.name} ${customer.phone} ${customer.email}`.toLowerCase().includes(search.toLowerCase()));
+  const [customerType, setCustomerType] = useState<
+  "sales" | "service" | "vendor"
+>("sales");
+
+  const salesCustomerIds = new Set(sales.map((sale) => sale.customerId));
+
+const serviceCustomerIds = new Set(services.map((service) => service.customerId));
+
+const vendorCustomerIds = new Set(
+  services.map((service) => service.customerId)
+);
+
+const customerTypeIds =
+  customerType === "sales"
+    ? salesCustomerIds
+    : customerType === "service"
+    ? serviceCustomerIds
+    : vendorCustomerIds;
+
+const filtered = customers.filter((customer) => {
+  const matchesType = customerTypeIds.has(customer.id);
+  const matchesSearch =
+    !search ||
+    `${customer.name} ${customer.phone} ${customer.email}`
+      .toLowerCase()
+      .includes(search.toLowerCase());
+
+  return matchesType && matchesSearch;
+});
+  
   return <>
-    <PageHeader eyebrow="PEOPLE & RELATIONSHIPS" title="Customers" description="A single place for the people behind every sale and service."><Button onClick={onAdd}><Plus size={16} /> Add customer</Button></PageHeader>
+    <PageHeader eyebrow="PEOPLE & RELATIONSHIPS" title="Customers" description="A single place for the people behind every sale and service."><Button onClick={onAdd}><Plus size={16} /> Add customer</Button>
+    </PageHeader>
+    <div className="customer-type-toggle">
+  <button
+    className={customerType === "sales" ? "active" : ""}
+    onClick={() => setCustomerType("sales")}
+  >
+    Sales Customers
+  </button>
+
+  <button
+    className={customerType === "service" ? "active" : ""}
+    onClick={() => setCustomerType("service")}
+  >
+    Service Customers
+  </button>
+
+  <button
+    className={customerType === "vendor" ? "active" : ""}
+    onClick={() => setCustomerType("vendor")}
+  >
+    Vendor Customers
+  </button>
+</div>
     <div className="customer-metrics"><div className="panel mini-metric"><span className="metric-icon blue"><Users size={17} /></span><span>Total customers<strong>{customers.length}</strong></span></div><div className="panel mini-metric"><span className="metric-icon green"><CreditCard size={17} /></span><span>Sales recorded<strong>{sales.length}</strong></span></div><div className="panel mini-metric"><span className="metric-icon amber"><Wrench size={17} /></span><span>Service jobs<strong>{services.length}</strong></span></div></div>
-    <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Search name, phone or email…" /></label><span className="table-results">{filtered.length} customers</span></div>{filtered.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>CUSTOMER</th><th>CONTACT</th><th>SALES</th><th>SERVICE JOBS</th><th>SPEND</th><th>OUTSTANDING</th><th /></tr></thead><tbody>{filtered.map((customer) => {
-      const ownSales = sales.filter((sale) => sale.customerId === customer.id);
-      const ownServices = services.filter((service) => service.customerId === customer.id);
-      const spend = ownSales.reduce((sum, sale) => sum + sale.finalAmount, 0) + ownServices.reduce((sum, service) => sum + service.serviceAmount - service.discount, 0);
-      const due = ownSales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0) + ownServices.reduce((sum, service) => sum + serviceDue(service), 0);
-      return <tr key={customer.id}><td><span className="customer-cell"><span className="mini-avatar">{customer.name[0]?.toUpperCase()}</span><span><strong>{customer.name}</strong><small>Since {dateLabel(customer.createdAt)}</small></span></span></td><td>{customer.phone}<small className="table-subtext">{customer.email || ""}</small></td><td>{ownSales.length}</td><td>{ownServices.length}</td><td><strong>{money(spend)}</strong></td><td><strong className={due ? "due-text" : ""}>{money(due)}</strong></td><td><button className="row-action" aria-label={`Open ${customer.name}`} onClick={() => onView(customer.id)}><ArrowRight size={15} /></button><button className="row-action" aria-label={`Edit ${customer.name}`} onClick={() => onEdit(customer)}><Settings size={14} /></button></td></tr>;
-    })}</tbody></table></div> : <EmptyState icon={Users} title={search ? "No customers found" : "Meet your first customer"} detail={search ? "Try a different search." : "Customers added during sales or service intake appear here too."} action={!search ? <Button onClick={onAdd}><Plus size={15} /> Add customer</Button> : undefined} />}</div>
+    <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Search name, phone or email…" /></label><span className="table-results">
+  {filtered.length} {customerType === "sales"
+    ? "sales customers"
+    : customerType === "service"
+    ? "service customers"
+    : "vendor customers"}
+</span></div>{filtered.length ? <div className="table-scroll"><table className="data-table"><thead>
+  <tr>
+    <th>CUSTOMER</th>
+    <th>CONTACT</th>
+
+    {customerType === "sales" && (
+      <>
+        <th>SALES</th>
+        <th>SPEND</th>
+        <th>OUTSTANDING</th>
+      </>
+    )}
+
+    {customerType === "service" && (
+      <>
+        <th>SERVICE JOBS</th>
+        <th>DEVICE</th>
+        <th>STATUS</th>
+      </>
+    )}
+
+    {customerType === "vendor" && (
+      <>
+        <th>VENDOR JOBS</th>
+        <th>VENDOR</th>
+        <th>STATUS</th>
+      </>
+    )}
+
+    <th />
+  </tr>
+</thead><tbody>{filtered.map((customer) => {
+  const ownSales = sales.filter(
+    (sale) => sale.customerId === customer.id
+  );
+
+  const ownServices = services.filter(
+    (service) => service.customerId === customer.id
+  );
+
+  const ownVendorServices = ownServices;
+
+  const spend =
+    ownSales.reduce((sum, sale) => sum + sale.finalAmount, 0) +
+    ownServices.reduce(
+      (sum, service) => sum + service.serviceAmount - service.discount,
+      0
+    );
+
+  const due =
+    ownSales.reduce(
+      (sum, sale) =>
+        sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)),
+      0
+    ) +
+    ownServices.reduce((sum, service) => sum + serviceDue(service), 0);
+
+  return (
+    <tr key={customer.id}>
+      <td>
+        <span className="customer-cell">
+          <span className="mini-avatar">
+            {customer.name[0]?.toUpperCase()}
+          </span>
+          <span>
+            <strong>{customer.name}</strong>
+            <small>Since {dateLabel(customer.createdAt)}</small>
+          </span>
+        </span>
+      </td>
+
+      <td>
+        {customer.phone}
+        <small className="table-subtext">{customer.email || ""}</small>
+      </td>
+
+      {customerType === "sales" && (
+        <>
+          <td>{ownSales.length}</td>
+          <td><strong>{money(spend)}</strong></td>
+          <td>
+            <strong className={due ? "due-text" : ""}>
+              {money(due)}
+            </strong>
+          </td>
+        </>
+      )}
+
+      {customerType === "service" && (
+        <>
+          <td>{ownServices.length}</td>
+          <td>
+            {ownServices.map((service) => (
+              <div key={service.id}>
+                {deviceLabel(service)}
+              </div>
+            ))}
+          </td>
+          <td>
+            {ownServices.map((service) => (
+              <div key={service.id}>
+                <StatusBadge status={service.status} />
+              </div>
+            ))}
+          </td>
+        </>
+      )}
+
+      {customerType === "vendor" && (
+        <>
+          <td>{ownVendorServices.length}</td>
+          <td>
+            {ownVendorServices.map((service) => (
+              <div key={service.id}>
+                {service.brand} {service.mobileModel}
+              </div>
+            ))}
+          </td>
+          <td>
+            {ownVendorServices.map((service) => (
+              <div key={service.id}>
+                <StatusBadge status={service.status} />
+              </div>
+            ))}
+          </td>
+        </>
+      )}
+
+      <td>
+        <button
+          className="row-action"
+          aria-label={`Open ${customer.name}`}
+          onClick={() => onView(customer.id)}
+        >
+          <ArrowRight size={15} />
+        </button>
+
+        <button
+          className="row-action"
+          aria-label={`Edit ${customer.name}`}
+          onClick={() => onEdit(customer)}
+        >
+          <Settings size={14} />
+        </button>
+      </td>
+    </tr>
+  );
+})}</tbody></table></div> : <EmptyState icon={Users} title={search ? "No customers found" : "Meet your first customer"} detail={search ? "Try a different search." : "Customers added during sales or service intake appear here too."} action={!search ? <Button onClick={onAdd}><Plus size={15} /> Add customer</Button> : undefined} />}</div>
   </>;
 }
 
@@ -2205,7 +2790,15 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
           service.deliveryCustomer || "—",
           pdfMoney(service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge),
         ];
-        const lines = values.map((value, index) => pdf.splitTextToSize(value || "—", columns[index].width - 2) as string[]);
+        const lines = values.map((value, index) => {
+  const column = columns[index];
+  const width = column?.width ?? 25;
+
+  return pdf.splitTextToSize(
+    String(value || "—"),
+    Math.max(5, width - 2)
+  ) as string[];
+});
         const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
         if (y + rowHeight > pageHeight - 12) {
           pdf.addPage();
@@ -2482,7 +3075,7 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
     filteredSales.forEach((sale) => rows.push(["Sale", sale.invoiceNumber, sale.invoiceDate, sale.customerName, String(sale.finalAmount), String(paymentTotal(sale.payments)), String(Math.max(0, sale.finalAmount - paymentTotal(sale.payments))), statusOf(sale.finalAmount, paymentTotal(sale.payments))]));
     filteredServices.forEach((service) => rows.push(["Service", service.serviceNumber, service.inDate, service.customerName, String(service.serviceAmount - service.discount), String(servicePaid(service)), String(serviceDue(service)), service.status]));
     const csv = rows.map((row) => row.map((field) => `"${field.replaceAll('"', '""')}"`).join(",")).join("\r\n");
-    const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); link.download = `ahmobiles-report-${dateInputValue()}.csv`; link.click(); URL.revokeObjectURL(link.href);
+    const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); link.download = `AH Mobiles-report-${dateInputValue()}.csv`; link.click(); URL.revokeObjectURL(link.href);
   };
   const exportServicesPdf = () => {
     const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
@@ -2567,7 +3160,7 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
       pdf.setFontSize(8);
       pdf.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 5, { align: "right" });
     }
-    pdf.save(`ahmobiles-service-report-${dateInputValue()}.pdf`);
+    pdf.save(`AH Mobiles-service-report-${dateInputValue()}.pdf`);
   };
   return <>
     <PageHeader eyebrow="BUSINESS INSIGHTS" title="Reports" description="A clear picture of sales, services, and the money collected."><Button variant="secondary" onClick={exportServicesPdf}><Download size={15} /> Export services PDF</Button><Button variant="secondary" onClick={exportCsv}><Download size={15} /> Export CSV</Button></PageHeader>
@@ -2646,7 +3239,7 @@ function SettingsPage({ settings, identity, canEdit, onSave, onChangePassword }:
           <div className="form-grid two-col">
             <FormField label="Sales prefix"><input className="input" maxLength={6} value={form.salesPrefix} onChange={(event) => update("salesPrefix", event.target.value.toUpperCase())} /></FormField>
             <FormField label="Service prefix"><input className="input" maxLength={6} value={form.servicePrefix} onChange={(event) => update("servicePrefix", event.target.value.toUpperCase())} /></FormField>
-            <FormField label="Invoice print size"><select className="input" value={form.invoicePaperSize} onChange={(event) => update("invoicePaperSize", event.target.value as ShopSettings["invoicePaperSize"])}><option value="A4">A4</option><option value="Thermal">Thermal receipt (80 mm)</option></select><small className="field-hint">PDF downloads remain A4; this setting applies to printing.</small></FormField>
+            <FormField label="Invoice print size"><select className="input" value={form.invoicePaperSize} onChange={(event) => update("invoicePaperSize", event.target.value as ShopSettings["invoicePaperSize"])}><option value="A4">A4</option><option value="Thermal">Thermal receipt (80 mm)</option></select><small className="field-hint">PDF downloads remain A4; this setting applies to sales and service printing.</small></FormField>
             <FormField label="Invoice footer"><textarea className="input textarea" value={form.invoiceFooter} onChange={(event) => update("invoiceFooter", event.target.value)} /></FormField>
             <div className="invoice-format-preview"><span>Next invoice numbers</span><strong>{form.salesPrefix || "SAL"}-{businessYear()}-0001</strong><strong>{form.servicePrefix || "SRV"}-{businessYear()}-0001</strong></div>
           </div>
