@@ -3247,10 +3247,10 @@ function SettingsPage({ settings, identity, canEdit, onSave, onChangePassword }:
         </fieldset>
         {canEdit && <div className="form-footer"><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={16} /> Save settings</>}</Button></div>}
       </div>
-      <aside className="settings-aside">
+      {/* <aside className="settings-aside">
         <div className="panel settings-note"><span className="settings-note-icon"><ShieldCheck size={17} /></span><h3>Your data, kept safe.</h3><p>Each workspace is scoped to its authenticated owner. Keep Firestore rules deployed and up to date.</p><a href="https://firebase.google.com/docs/firestore/security/get-started" target="_blank" rel="noreferrer">Read about Firestore security <ArrowRight size={13} /></a></div>
         <div className="panel settings-note"><span className="settings-note-icon violet-icon"><Zap size={17} /></span><h3>Made for India.</h3><p>Currency is displayed in Indian rupees (₹) and dates use the Indian format.</p></div>
-      </aside>
+      </aside> */}
     </form>
   </>;
 }
