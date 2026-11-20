@@ -9,7 +9,7 @@ export const vendorServiceFormSchema = z.object({
   customerName: z.string().trim().min(2, "Enter the customer's name."), brand: z.string().trim().min(1, "Enter the device brand."),
   mobileModel: z.string().trim().min(1, "Enter the device model."), customerNumber: phone,
   status: z.enum(["Received", "In progress", "Ready", "Returned"]),
-  receivedCondition: z.enum(["Good condition", "Display damaged", "Body damaged", "Back panel damaged", "Screen cracked", "Power issue", "Other"]),
+  receivedCondition: z.string().trim().min(1, "Enter received condition.").max(200),
   fault: z.string().trim(), deliveryDate: z.string(), deliveryCustomer: z.string().trim().max(120), serviceCharge: money,
 });
 export const productSchema = z.object({ id: z.string(), category: z.enum(["Electronics", "Accessories"]).optional(), brand: z.string().trim(), model: z.string().trim(), productName: z.string().trim().optional(), imei: z.string().trim().max(20, "IMEI must be 20 characters or fewer."), quantity: z.coerce.number().int().min(1, "Quantity must be at least one."), rate: money, discount: money }).refine((product) => {

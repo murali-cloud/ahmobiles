@@ -144,9 +144,47 @@ function newId(): string {
 
 type ToastInfo = { text: string; tone: "success" | "error" };
 
+const NAVIGATE_EVENT = "workspace-navigate";
+
+export function clientNavigate(url: string) {
+  if (typeof window !== "undefined") {
+    if (window.location.pathname !== url) {
+      window.history.pushState(null, "", url);
+    }
+    window.dispatchEvent(new CustomEvent(NAVIGATE_EVENT, { detail: url }));
+  }
+}
+
 export default function Workspace() {
   const pathname = usePathname();
   const router = useRouter();
+  const [clientPath, setClientPath] = useState<string>(() => (typeof window !== "undefined" ? window.location.pathname : pathname));
+  const currentPath = clientPath || pathname;
+
+  const navigate = useCallback((url: string) => {
+    clientNavigate(url);
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setClientPath(window.location.pathname);
+    };
+    const handleCustomNav = (event: Event) => {
+      const customEvent = event as CustomEvent<string>;
+      setClientPath(customEvent.detail || window.location.pathname);
+    };
+    window.addEventListener("popstate", handlePopState);
+    window.addEventListener(NAVIGATE_EVENT, handleCustomNav);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+      window.removeEventListener(NAVIGATE_EVENT, handleCustomNav);
+    };
+  }, []);
+
+  useEffect(() => {
+    setClientPath(pathname);
+  }, [pathname]);
+
   const [data, setData] = useState<WorkspaceData>(EMPTY_DATA);
   const [user, setUser] = useState<WorkspaceIdentity | null>(null);
   const [ready, setReady] = useState(!firebaseConfigured);
@@ -483,11 +521,11 @@ export default function Workspace() {
           });
         }
         setModal(null);
-        router.push("/vendors");
+        navigate("/vendors");
         notify(`${vendor.name} and its vendor service entries were deleted.`);
       }}
     />);
-  }, [data, notify, persist, router, user]);
+  }, [data, navigate, notify, persist, user]);
 
   const saveVendorService = useCallback(async (
     draft: Omit<VendorService, "id" | "createdAt">,
@@ -752,7 +790,7 @@ export default function Workspace() {
     />;
   }
 
-  const segments = pathname.split("/").filter(Boolean);
+  const segments = currentPath.split("/").filter(Boolean);
   const route = segments[0] ?? "dashboard";
   const subroute = segments[1] ?? "";
   const routeId = segments[2] ?? (subroute && !["create", "ready"].includes(subroute) ? subroute : "");
@@ -907,24 +945,24 @@ export default function Workspace() {
           try {
             const sale = await saveSale(draft);
             notify("Sales bill saved.");
-            router.push(`/sales/${sale.id}`);
+            navigate(`/sales/${sale.id}`);
             return sale;
           } catch (reason) { notifyFromError(reason); }
           finally { setBusy(false); }
         }}
-        onCancel={() => router.push("/sales")}
+        onCancel={() => navigate("/sales")}
       />
     : route === "sales" && routeId
     ? <SaleDetail
         sale={data.sales.find((item) => item.id === routeId || item.invoiceNumber === routeId)}
         settings={data.settings}
-        onBack={() => router.push("/sales")}
+        onBack={() => navigate("/sales")}
         onPayment={(id) => openPayment("sale", id)}
         canEdit={canEditModule("sales")}
       />
     : route === "sales"
     ? <SalesPage sales={data.sales} search={globalSearch} onSearch={setGlobalSearch}
-        onCreate={() => router.push("/sales/create")} onView={(id) => router.push(`/sales/${id}`)}
+        onCreate={() => navigate("/sales/create")} onView={(id) => navigate(`/sales/${id}`)}
         onPayment={(id) => openPayment("sale", id)} settings={data.settings} canEdit={canEditModule("sales")} />
     : route === "services" && subroute === "create"
     ? <ServiceForm
@@ -938,12 +976,12 @@ export default function Workspace() {
           try {
             const service = await saveService(draft);
             notify("Service job created.");
-            router.push(`/services/${service.id}`);
+            navigate(`/services/${service.id}`);
             return service;
           } catch (reason) { notifyFromError(reason); }
           finally { setBusy(false); }
         }}
-        onCancel={() => router.push("/services")}
+        onCancel={() => navigate("/services")}
       />
     : route === "services" && subroute === "ready"
     ? <ReadyPage
@@ -951,7 +989,7 @@ export default function Workspace() {
         vendorServices={data.vendorServices}
         vendors={data.vendors}
         settings={data.settings}
-        onView={(id) => router.push(`/services/${id}`)}
+        onView={(id) => navigate(`/services/${id}`)}
         onPayment={(id) => openPayment("service", id)}
         onReturn={(service) => setServiceStatus(service, "Returned")}
         onVendorStatusChange={changeVendorServiceStatus}
@@ -962,13 +1000,13 @@ export default function Workspace() {
     : route === "services" && routeId
     ? <ServiceDetail service={data.services.find((item) => item.id === routeId || item.serviceNumber === routeId)}
         vendor={data.vendors.find((item) => item.id === data.services.find((service) => service.id === routeId || service.serviceNumber === routeId)?.vendorId)}
-        onBack={() => router.push(canViewModule("services") || canViewModule("reports") ? "/services" : "/services/ready")}
+        onBack={() => navigate(canViewModule("services") || canViewModule("reports") ? "/services" : "/services/ready")}
         onPayment={(id) => openPayment("service", id)} settings={data.settings}
         onUpdate={(service) => setServiceStatus(service, service.status)}
         onNotRepaired={(service) => showNotRepairedModal(service)} canEdit={canEditModule("services")} />
     : route === "services"
     ? <ServicesPage services={data.services} search={globalSearch} onSearch={setGlobalSearch}
-        onCreate={() => router.push("/services/create")} onView={(id) => router.push(`/services/${id}`)}
+        onCreate={() => navigate("/services/create")} onView={(id) => navigate(`/services/${id}`)}
         onPayment={(id) => openPayment("service", id)} onUpdate={(service) => setServiceStatus(service, service.status)}
         onVendorChange={assignServiceVendor} canEdit={canEditModule("services")} vendors={data.vendors} settings={data.settings} />
     : route === "vendors"
@@ -978,7 +1016,7 @@ export default function Workspace() {
         search={globalSearch}
         onSearch={setGlobalSearch}
         selectedId={routeId === "create" ? subroute : routeId}
-        onSelect={(id) => router.push(id ? `/vendors/${id}` : "/vendors")}
+        onSelect={(id) => navigate(id ? `/vendors/${id}` : "/vendors")}
         onCreateService={addVendorServiceDialog}
         onEditService={editVendorServiceDelivery}
         onMarkNotRepaired={confirmVendorServiceNotRepaired}
@@ -990,7 +1028,7 @@ export default function Workspace() {
     : route === "customers"
     ? <CustomersPage customers={data.customers} sales={data.sales} services={data.services}
         search={globalSearch} onSearch={setGlobalSearch} onAdd={addCustomerDialog}
-        selectedId={routeId} onView={(id) => router.push(id ? `/customers/${id}` : "/customers")}
+        selectedId={routeId} onView={(id) => navigate(id ? `/customers/${id}` : "/customers")}
         onEdit={editCustomerDialog} />
     : route === "reports"
     ? <ReportsPage data={data} revenuePeriod={revenuePeriod} setRevenuePeriod={setRevenuePeriod}
@@ -1005,8 +1043,8 @@ export default function Workspace() {
         catch (reason) { notifyFromError(reason); throw reason; }
       }} />
     : <Dashboard data={data} period={period} setPeriod={setPeriod} revenuePeriod={revenuePeriod} setRevenuePeriod={setRevenuePeriod} chartFrom={chartFrom} setChartFrom={setChartFrom} chartTo={chartTo} setChartTo={setChartTo}
-        onCreateSale={() => router.push("/sales/create")}
-        onCreateService={() => router.push("/services/create")}
+        onCreateSale={() => navigate("/sales/create")}
+        onCreateService={() => navigate("/services/create")}
         canCreateSale={canEditModule("sales")}
         canCreateService={canEditModule("services")}
         canViewSales={canViewModule("sales") || canViewModule("reports") || canViewModule("overview")}
@@ -1016,10 +1054,10 @@ export default function Workspace() {
         canOpenServices={canViewModule("services") || canViewModule("reports")}
         canOpenReady={canAccessReady}
         canOpenCustomers={canViewModule("customers")}
-        onSeeSales={() => router.push("/sales")}
-        onSeeServices={() => router.push("/services")}
-        onSeeReady={() => router.push("/services/ready")}
-        onCustomer={() => router.push("/customers")}
+        onSeeSales={() => navigate("/sales")}
+        onSeeServices={() => navigate("/services")}
+        onSeeReady={() => navigate("/services/ready")}
+        onCustomer={() => navigate("/customers")}
       />;
 
   return (
@@ -1035,7 +1073,12 @@ export default function Workspace() {
         <nav className="nav-list" aria-label="Main navigation">
           {visibleNav.map(({ label, href, icon: Icon }) => (
             <Link key={href} href={href} className={`nav-link ${activeHref === href ? "active" : ""}`}
-              onClick={() => setMenuOpen(false)}>
+              onClick={(event) => {
+                if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+                event.preventDefault();
+                setMenuOpen(false);
+                navigate(href);
+              }}>
               <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
               {href === "/services/ready" && (
                 data.services.filter((item) => item.status === "Ready").length
@@ -1051,7 +1094,12 @@ export default function Workspace() {
         </nav>
         <div className="sidebar-spacer" />
         <Link href="/settings" className={`nav-link settings-link ${activeHref === "/settings" ? "active" : ""}`}
-          onClick={() => setMenuOpen(false)}>
+          onClick={(event) => {
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+            event.preventDefault();
+            setMenuOpen(false);
+            navigate("/settings");
+          }}>
           <Settings size={18} strokeWidth={1.8} /><span>Settings</span>
         </Link>
         <div className="user-profile">
@@ -1512,7 +1560,7 @@ function SalesTable({ sales, compact = false, canOpen = true, onView, onPayment,
   sales: Sale[]; compact?: boolean; canOpen?: boolean; onView?: (id: string) => void; onPayment?: (id: string) => void; settings?: ShopSettings;
 }) {
   const router = useRouter();
-  const viewSale = (id: string) => onView ? onView(id) : router.push(`/sales/${id}`);
+  const viewSale = (id: string) => onView ? onView(id) : clientNavigate(`/sales/${id}`);
   return <div className={`table-scroll ${compact ? "compact-table" : ""}`}><table className="data-table"><thead><tr><th>INVOICE</th><th>CUSTOMER</th>{!compact && <th>PRODUCTS</th>}<th>DATE</th><th>TOTAL</th>{!compact && <th>PAID</th>}<th>STATUS</th><th /></tr></thead><tbody>
     {sales.map((sale) => {
       const paid = paymentTotal(sale.payments);
@@ -1978,7 +2026,7 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
     pdf.save(`service-report-${dateInputValue()}.pdf`);
   };
   return <>
-    <PageHeader eyebrow="REPAIR & CARE" title="Service desk" description="Track every repair from intake to handover."><Button variant="secondary" onClick={exportServicesPdf}><Download size={15} /> Export PDF</Button><Button variant="secondary" onClick={() => router.push("/services/ready")}><CheckCircle2 size={15} /> Ready for pickup</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> New service job</Button>}</PageHeader>
+    <PageHeader eyebrow="REPAIR & CARE" title="Service desk" description="Track every repair from intake to handover."><Button variant="secondary" onClick={exportServicesPdf}><Download size={15} /> Export PDF</Button><Button variant="secondary" onClick={() => clientNavigate("/services/ready")}><CheckCircle2 size={15} /> Ready for pickup</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> New service job</Button>}</PageHeader>
     <div className="service-kpis">{(["Received", "In progress", "Ready", "Returned", "Refund"] as const).map((status) => <div className="service-kpi" key={status}><span className={`status-dot ${statusClass(status)}`} /><span>{status}</span><strong>{status === "Refund" ? services.filter((item) => item.returnOutcome === "Not repaired").length : services.filter((item) => item.status === status && item.returnOutcome !== "Not repaired").length}</strong></div>)}</div>
     <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search bill, customer, model or IMEI…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned", "Refund"] as const).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label><label className="select-wrap"><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All payments</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option><option>Refund</option></select><ChevronDown size={14} /></label><div className="date-range compact-date-range"><label>From<input aria-label="Services from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /></label><label>To<input aria-label="Services to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /></label></div><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
       {filtered.length ? <ServiceJobsTable services={filtered.slice((page - 1) * pageSize, page * pageSize)} vendors={vendors} onView={onView} onPayment={onPayment} onUpdate={onUpdate} onVendorChange={onVendorChange} canEdit={canEdit} settings={settings} /> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
@@ -2026,7 +2074,7 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
   const readyCount = readyJobs.length + readyVendorServices.length;
   return <>
     <PageHeader eyebrow="SERVICE DESK · HANDOVER" title="Ready for delivery" description="The finishing touch: get these repaired devices back to their owners.">
-      {canViewAllServices && <Button variant="secondary" onClick={() => router.push("/services")}><Wrench size={15} /> All service jobs</Button>}
+      {canViewAllServices && <Button variant="secondary" onClick={() => clientNavigate("/services")}><Wrench size={15} /> All service jobs</Button>}
     </PageHeader>
     <div className="segmented" style={{ width: "fit-content", marginBottom: 18 }}>
       <button type="button" className={activeList === "services" ? "selected" : ""} onClick={() => setActiveList("services")}>
@@ -2100,7 +2148,7 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
   )}
 </div>}
         </article>;
-      })}</div> : <div className="panel"><EmptyState icon={CheckCircle2} title="No shop services ready" detail="When a service job is marked Ready, it will appear here." action={canViewAllServices ? <Button variant="secondary" onClick={() => router.push("/services")}><Wrench size={15} /> View service jobs</Button> : undefined} /></div>
+      })}</div> : <div className="panel"><EmptyState icon={CheckCircle2} title="No shop services ready" detail="When a service job is marked Ready, it will appear here." action={canViewAllServices ? <Button variant="secondary" onClick={() => clientNavigate("/services")}><Wrench size={15} /> View service jobs</Button> : undefined} /></div>
     ) : (
       readyVendorServices.length ? <div className="ready-grid">{readyVendorServices.map((service) => {
         const vendor = vendors.find((item) => item.id === service.vendorId);
@@ -2929,24 +2977,38 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
   onSave: (service: Omit<VendorService, "id" | "createdAt" | "vendorId">) => Promise<void>;
 }) {
   const [values, setValues] = useState({
-  serviceNumber: initialServiceNumber,
-  inDate: dateInputValue(),
-  customerName: "",
-  brand: "",
-  mobileModel: "",
-  customerNumber: "",
-  fault: "",
-  status: "Received" as ServiceStatus,
-  receivedCondition: "Good condition",
-  deliveryDate: "",
-  deliveryCustomer: "",
-  serviceCharge: "",
-});
+    serviceNumber: initialServiceNumber,
+    inDate: dateInputValue(),
+    customerName: "",
+    brand: "",
+    mobileModel: "",
+    customerNumber: "",
+    fault: "",
+    status: "Received" as ServiceStatus,
+    receivedCondition: "Good condition",
+    deliveryDate: "",
+    deliveryCustomer: "",
+    serviceCharge: "",
+  });
+  const [otherCondition, setOtherCondition] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    const parsed = vendorServiceFormSchema.safeParse(values);
+    if (values.receivedCondition === "Other" && !otherCondition.trim()) {
+      setError("Please specify the other condition.");
+      return;
+    }
+    const finalCondition = values.receivedCondition === "Other"
+      ? (otherCondition.trim()
+          ? (otherCondition.trim().toLowerCase().startsWith("other") ? otherCondition.trim() : `Other: ${otherCondition.trim()}`)
+          : "Other")
+      : values.receivedCondition;
+
+    const parsed = vendorServiceFormSchema.safeParse({
+      ...values,
+      receivedCondition: finalCondition,
+    });
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? "Check the service details.");
       return;
@@ -2958,6 +3020,7 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
         ...parsed.data,
         // Keep the vendor-reported fault with this vendor service record.
         fault: values.fault.trim(),
+        receivedCondition: finalCondition,
         inDate: businessDateTime(parsed.data.inDate),
         deliveryDate: parsed.data.deliveryDate ? businessDateTime(parsed.data.deliveryDate) : undefined,
       } as Omit<VendorService, "id" | "createdAt" | "vendorId">;
@@ -2982,7 +3045,12 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
       <select
         className="input"
         value={values.receivedCondition}
-        onChange={(event) => update("receivedCondition", event.target.value)}
+        onChange={(event) => {
+          update("receivedCondition", event.target.value);
+          if (event.target.value !== "Other") {
+            setOtherCondition("");
+          }
+        }}
       >
         {CONDITIONS.map((condition) => (
           <option key={condition} value={condition}>
@@ -2990,6 +3058,17 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
           </option>
         ))}
       </select>
+      {values.receivedCondition === "Other" && (
+        <input
+          className="input"
+          style={{ marginTop: 8 }}
+          type="text"
+          value={otherCondition}
+          onChange={(event) => setOtherCondition(event.target.value)}
+          placeholder="Please specify other condition..."
+          autoFocus
+        />
+      )}
     </FormField>
     <FormField label="Service charge (₹)"><input className="input" type="number" min="0" value={values.serviceCharge} onChange={(event) => update("serviceCharge", event.target.value)} /></FormField>
     <FormField label="Delivery date (optional)"><input className="input" type="date" value={values.deliveryDate} onChange={(event) => update("deliveryDate", event.target.value)} /></FormField>

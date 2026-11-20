@@ -12,10 +12,7 @@ const vendorServiceSchema = z.object({
   customerNumber: z.string().trim().min(7).max(20),
   status: z.enum(["Received", "In progress", "Ready", "Returned"]),
   returnOutcome: z.enum(["Not repaired"]).optional(),
-  receivedCondition: z.enum([
-    "Good condition", "Display damaged", "Body damaged", "Back panel damaged",
-    "Screen cracked", "Power issue", "Other",
-  ]),
+  receivedCondition: z.string().trim().min(1, "Enter received condition.").max(200),
   fault: z.string().trim().max(1000).default(""),
   deliveryDate: z.string().datetime().optional(),
   deliveryCustomer: z.string().trim().max(120).optional(),
