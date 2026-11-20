@@ -13,15 +13,22 @@ const paymentSchema = z.object({
 
 const productSchema = z.object({
   id: z.string().min(1).max(80),
-  brand: z.string().trim().min(1).max(80),
-  model: z.string().trim().min(1).max(120),
+  category: z.enum(["Electronics", "Accessories"]).optional(),
+  brand: z.string().trim().max(80),
+  model: z.string().trim().max(120),
+  productName: z.string().trim().max(200).optional(),
   imei: z.string().trim().max(20),
   quantity: z.number().int().min(1).max(1000),
   rate: z.number().finite().min(0),
   discount: z.number().finite().min(0),
 }).strict().refine((product) => product.discount <= product.quantity * product.rate, {
   message: "A product discount cannot exceed its line amount.",
-});
+}).refine((product) => {
+  const cat = product.category ?? "Electronics";
+  if (cat === "Electronics") return !!(product.brand && product.model);
+  if (cat === "Accessories") return !!(product.productName);
+  return true;
+}, { message: "Electronics require brand and model; Accessories require a product name." });
 
 const commonSchema = {
   customerId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
@@ -47,8 +54,10 @@ const serviceSchema = z.object({
   serviceNumber: z.string().trim().min(1).max(120).optional(),
   vendorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
   inDate: z.string().datetime(),
-  brand: z.string().trim().min(1).max(80),
-  mobileModel: z.string().trim().min(1).max(120),
+  category: z.enum(["Electronics", "Accessories"]).optional(),
+  brand: z.string().trim().max(80),
+  mobileModel: z.string().trim().max(120),
+  productName: z.string().trim().max(200).optional(),
   imei: z.string().trim().max(20),
   reportedFault: z.string().trim().min(3).max(2000),
   technicianNotes: z.string().max(4000),
@@ -62,7 +71,12 @@ const serviceSchema = z.object({
   deliveryOutDate: z.string().datetime().optional(),
   deliveryOutPerson: z.string().max(120).optional(),
   deliveryRemarks: z.string().max(2000).optional(),
-}).strict();
+}).strict().refine((svc) => {
+  const cat = svc.category ?? "Electronics";
+  if (cat === "Electronics") return !!(svc.brand && svc.mobileModel);
+  if (cat === "Accessories") return !!(svc.productName);
+  return true;
+}, { message: "Electronics require brand and model; Accessories require a product name." });
 
 const createSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("sales"), prefix: z.string().regex(/^[A-Z0-9]{2,6}$/), record: saleSchema }).strict(),

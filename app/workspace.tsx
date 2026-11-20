@@ -550,10 +550,10 @@ export default function Workspace() {
 
   const updateVendorServiceRecord = useCallback(async (
     service: VendorService,
-    changes: Partial<Pick<VendorService, "status" | "deliveryDate" | "deliveryCustomer" | "serviceCharge" | "returnOutcome">>,
+    changes: Partial<VendorService>,
   ) => {
     if (firebaseConfigured && user) {
-      await updateVendorServiceCloud(service.id, changes as Partial<VendorService>);
+      await updateVendorServiceCloud(service.id, changes);
       setData((current) => ({
         ...current,
         vendorServices: current.vendorServices.map((item) => item.id === service.id ? { ...item, ...changes } : item),
@@ -563,20 +563,20 @@ export default function Workspace() {
     }
   }, [data, persist, user]);
 
-  const editVendorServiceDelivery = (service: VendorService) => {
+  const viewVendorServiceDetail = (service: VendorService) => {
     const vendor = data.vendors.find((item) => item.id === service.vendorId);
     if (!vendor) {
       notify("The service vendor could not be found. Reload and try again.", "error");
       return;
     }
-    setModal(<VendorServiceDeliveryModal
+    setModal(<VendorServiceDetailModal
       service={service}
       vendor={vendor}
+      canEdit={canEditModule("vendors")}
       onClose={() => setModal(null)}
-      onSave={async (delivery) => {
-        await updateVendorServiceRecord(service, delivery);
-        setModal(null);
-        notify("Vendor service delivery details saved.");
+      onSave={async (updated) => {
+        await updateVendorServiceRecord(service, updated);
+        notify("Vendor service details updated.");
       }}
     />);
   };
@@ -1018,7 +1018,7 @@ export default function Workspace() {
         selectedId={routeId === "create" ? subroute : routeId}
         onSelect={(id) => navigate(id ? `/vendors/${id}` : "/vendors")}
         onCreateService={addVendorServiceDialog}
-        onEditService={editVendorServiceDelivery}
+        onEditService={viewVendorServiceDetail}
         onMarkNotRepaired={confirmVendorServiceNotRepaired}
         onStatusChange={changeVendorServiceStatus}
         onDeleteVendor={deleteServiceVendor}
@@ -2884,7 +2884,7 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
           </div>
         </div>
         {filteredVendorServices.length
-          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}><td><button className="table-primary-link" disabled={!canEdit} onClick={() => onEditService(service)}>{service.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(service.inDate)}</span></td><td>{service.customerName}</td><td><strong>{service.brand} {service.mobileModel}</strong></td><td>{service.customerNumber}</td><td>{service.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned" || service.returnOutcome === "Not repaired"} aria-label={`Update status for ${service.serviceNumber}`} title={service.status === "Returned" || service.returnOutcome === "Not repaired" ? "This vendor service has already been returned and its status is locked." : undefined} onChange={(event) => { if (event.target.value === "__not_repaired__") onMarkNotRepaired(service); else onStatusChange(service, event.target.value as ServiceStatus); }}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}<option value="__not_repaired__">Not repaired · Return device</option></select>}</td><td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td><td>{service.deliveryCustomer || "—"}</td><td><strong>{money(service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge)}</strong></td></tr>)}</tbody></table></div>
+          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}><td><button className="table-primary-link" onClick={() => onEditService(service)} title="View customer & product details">{service.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(service.inDate)}</span></td><td>{service.customerName}</td><td><strong>{service.brand} {service.mobileModel}</strong></td><td>{service.customerNumber}</td><td>{service.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned" || service.returnOutcome === "Not repaired"} aria-label={`Update status for ${service.serviceNumber}`} title={service.status === "Returned" || service.returnOutcome === "Not repaired" ? "This vendor service has already been returned and its status is locked." : undefined} onChange={(event) => { if (event.target.value === "__not_repaired__") onMarkNotRepaired(service); else onStatusChange(service, event.target.value as ServiceStatus); }}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}<option value="__not_repaired__">Not repaired · Return device</option></select>}</td><td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td><td>{service.deliveryCustomer || "—"}</td><td><strong>{money(service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge)}</strong></td></tr>)}</tbody></table></div>
           : <EmptyState icon={Wrench} title={servicesForVendor.length ? "No matching vendor services" : "No vendor services yet"} detail={servicesForVendor.length ? "Adjust your search or filters to see matching services." : "Add a service here to save it only under this vendor."} action={!servicesForVendor.length && canEdit ? <Button onClick={() => onCreateService(selectedVendor)}><Plus size={15} /> Add service</Button> : undefined} />}
       </div>
     </>;
@@ -3096,6 +3096,281 @@ function VendorServiceNotRepairedConfirm({ service, onCancel, onConfirm }: {
     }
   };
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!saving && event.target === event.currentTarget) onCancel(); }}><div className="modal-box compact-modal" role="dialog" aria-modal="true" aria-labelledby="vendor-not-repaired-title"><div className="modal-header"><div><span className="eyebrow">{service.serviceNumber}</span><h2 id="vendor-not-repaired-title">Not repaired · Return device?</h2></div><button className="icon-btn" type="button" disabled={saving} onClick={onCancel} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><p>Are you sure you want to mark this vendor service as returned without repair?</p>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" disabled={saving} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={saving} onClick={confirm}>{saving ? "Saving…" : "Yes, return device"}</Button></div></div></div>;
+}
+
+function VendorServiceDetailModal({
+  service,
+  vendor,
+  canEdit,
+  onClose,
+  onSave,
+}: {
+  service: VendorService;
+  vendor: ServiceVendor;
+  canEdit: boolean;
+  onClose: () => void;
+  onSave: (updated: Partial<VendorService>) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [values, setValues] = useState({
+    customerName: service.customerName,
+    customerNumber: service.customerNumber,
+    brand: service.brand,
+    mobileModel: service.mobileModel,
+    fault: service.fault || "",
+    receivedCondition: service.receivedCondition || "Good condition",
+    deliveryDate: service.deliveryDate?.slice(0, 10) || "",
+    deliveryCustomer: service.deliveryCustomer || "",
+    serviceCharge: String(service.serviceCharge || 0),
+  });
+  const [otherCondition, setOtherCondition] = useState(() => {
+    if (service.receivedCondition?.startsWith("Other: ")) {
+      return service.receivedCondition.slice(7);
+    }
+    return CONDITIONS.includes(service.receivedCondition) ? "" : (service.receivedCondition || "");
+  });
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const update = (field: keyof typeof values, value: string) =>
+    setValues((prev) => ({ ...prev, [field]: value }));
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!values.customerName.trim()) {
+      setError("Customer name is required.");
+      return;
+    }
+    if (!values.customerNumber.trim()) {
+      setError("Customer number is required.");
+      return;
+    }
+    if (!values.brand.trim()) {
+      setError("Brand is required.");
+      return;
+    }
+    if (!values.mobileModel.trim()) {
+      setError("Model is required.");
+      return;
+    }
+    if (values.receivedCondition === "Other" && !otherCondition.trim()) {
+      setError("Please specify the other condition.");
+      return;
+    }
+
+    const finalCondition = values.receivedCondition === "Other"
+      ? (otherCondition.trim()
+          ? (otherCondition.trim().toLowerCase().startsWith("other") ? otherCondition.trim() : `Other: ${otherCondition.trim()}`)
+          : "Other")
+      : values.receivedCondition;
+
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({
+        customerName: values.customerName.trim(),
+        customerNumber: values.customerNumber.trim(),
+        brand: values.brand.trim(),
+        mobileModel: values.mobileModel.trim(),
+        fault: values.fault.trim(),
+        receivedCondition: finalCondition,
+        serviceCharge: Number(values.serviceCharge) || 0,
+        deliveryDate: values.deliveryDate ? businessDateTime(values.deliveryDate) : undefined,
+        deliveryCustomer: values.deliveryCustomer.trim() || undefined,
+      });
+      setEditing(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save details.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (!saving && event.target === event.currentTarget) onClose(); }}>
+      <div className="modal-box" style={{ maxWidth: 580 }}>
+        <div className="modal-header">
+          <div>
+            <span className="eyebrow">SERVICE VENDOR · {vendor.name.toUpperCase()} · {service.serviceNumber}</span>
+            <h2>{editing ? "Edit vendor service" : `${service.brand} ${service.mobileModel}`}</h2>
+          </div>
+          <button className="icon-btn" type="button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        {!editing ? (
+          <>
+            <div style={{ padding: "16px 20px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 13, color: "#718096" }}>Status:</span>
+                  <StatusBadge status={service.returnOutcome === "Not repaired" ? "Refund" : service.status} />
+                </div>
+                <div style={{ fontSize: 13, color: "#718096" }}>
+                  In date: <strong>{dateLabel(service.inDate)}</strong>
+                </div>
+              </div>
+
+              {/* Customer Details */}
+              <div className="panel detail-panel" style={{ marginBottom: 14 }}>
+                <div className="panel-heading" style={{ padding: "10px 14px", borderBottom: "1px solid #edf0f4" }}>
+                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
+                </div>
+                <div className="detail-fields" style={{ padding: "12px 14px" }}>
+                  <DetailField label="In person / Name" value={service.customerName} />
+                  <DetailField label="Customer number" value={service.customerNumber} />
+                  <DetailField label="Out person / Delivered to" value={service.deliveryCustomer || "—"} />
+                  <DetailField label="Delivery date" value={service.deliveryDate ? dateLabel(service.deliveryDate) : "—"} />
+                </div>
+              </div>
+
+              {/* Product Details */}
+              <div className="panel detail-panel" style={{ marginBottom: 14 }}>
+                <div className="panel-heading" style={{ padding: "10px 14px", borderBottom: "1px solid #edf0f4" }}>
+                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Product details</h3>
+                </div>
+                <div className="detail-fields" style={{ padding: "12px 14px" }}>
+                  <DetailField label="Brand" value={service.brand} />
+                  <DetailField label="Model" value={service.mobileModel} />
+                  <DetailField label="Received condition" value={service.receivedCondition || "Not specified"} />
+                  <DetailField label="Reported fault" value={service.fault || "None recorded"} />
+                </div>
+              </div>
+
+              {/* Service & Charge Details */}
+              <div className="panel detail-panel">
+                <div className="panel-heading" style={{ padding: "10px 14px", borderBottom: "1px solid #edf0f4" }}>
+                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Service & charges</h3>
+                </div>
+                <div className="detail-fields" style={{ padding: "12px 14px" }}>
+                  <DetailField label="Service vendor" value={`${vendor.name} · ${vendor.phone}`} />
+                  <DetailField label="Service charge" value={money(service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge)} />
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-footer" style={{ padding: "12px 20px" }}>
+              {canEdit && (
+                <Button variant="secondary" onClick={() => setEditing(true)}>
+                  <Pencil size={14} /> Edit details
+                </Button>
+              )}
+              <Button onClick={onClose}>Close</Button>
+            </div>
+          </>
+        ) : (
+          <form onSubmit={submit}>
+            <div className="modal-fields form-grid two-col" style={{ padding: "16px 20px" }}>
+              <FormField label="In person (Customer Name)">
+                <input
+                  className="input"
+                  value={values.customerName}
+                  onChange={(event) => update("customerName", event.target.value)}
+                  required
+                />
+              </FormField>
+              <FormField label="Customer number">
+                <input
+                  className="input"
+                  inputMode="tel"
+                  value={values.customerNumber}
+                  onChange={(event) => update("customerNumber", event.target.value)}
+                  required
+                />
+              </FormField>
+              <FormField label="Brand">
+                <input
+                  className="input"
+                  value={values.brand}
+                  onChange={(event) => update("brand", event.target.value)}
+                  required
+                />
+              </FormField>
+              <FormField label="Model">
+                <input
+                  className="input"
+                  value={values.mobileModel}
+                  onChange={(event) => update("mobileModel", event.target.value)}
+                  required
+                />
+              </FormField>
+              <FormField label="Reported fault">
+                <textarea
+                  className="input textarea"
+                  value={values.fault}
+                  onChange={(event) => update("fault", event.target.value)}
+                  placeholder="Describe the device fault or issue"
+                />
+              </FormField>
+              <FormField label="Received condition">
+                <select
+                  className="input"
+                  value={CONDITIONS.includes(values.receivedCondition) ? values.receivedCondition : "Other"}
+                  onChange={(event) => {
+                    update("receivedCondition", event.target.value);
+                    if (event.target.value !== "Other") {
+                      setOtherCondition("");
+                    }
+                  }}
+                >
+                  {CONDITIONS.map((cond) => (
+                    <option key={cond} value={cond}>
+                      {cond}
+                    </option>
+                  ))}
+                </select>
+                {(values.receivedCondition === "Other" || !CONDITIONS.includes(values.receivedCondition)) && (
+                  <input
+                    className="input"
+                    style={{ marginTop: 8 }}
+                    type="text"
+                    value={otherCondition}
+                    onChange={(event) => setOtherCondition(event.target.value)}
+                    placeholder="Please specify other condition..."
+                    autoFocus
+                  />
+                )}
+              </FormField>
+              <FormField label="Service charge (₹)">
+                <input
+                  className="input"
+                  type="number"
+                  min="0"
+                  value={values.serviceCharge}
+                  onChange={(event) => update("serviceCharge", event.target.value)}
+                />
+              </FormField>
+              <FormField label="Delivery date">
+                <input
+                  className="input"
+                  type="date"
+                  value={values.deliveryDate}
+                  onChange={(event) => update("deliveryDate", event.target.value)}
+                />
+              </FormField>
+              <FormField label="Out person (Delivered to)">
+                <input
+                  className="input"
+                  value={values.deliveryCustomer}
+                  onChange={(event) => update("deliveryCustomer", event.target.value)}
+                />
+              </FormField>
+              {error && <span className="field-error" style={{ gridColumn: "span 2" }}>{error}</span>}
+            </div>
+            <div className="modal-footer" style={{ padding: "12px 20px" }}>
+              <Button variant="ghost" type="button" onClick={() => setEditing(false)} disabled={saving}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={saving}>
+                {saving ? "Saving…" : <><Check size={15} /> Save changes</>}
+              </Button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function VendorServiceDeliveryModal({ service, vendor, onClose, onSave }: {
