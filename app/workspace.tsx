@@ -7,6 +7,7 @@ import {
   Pencil, Plus, Printer, ScanLine, Search, Settings, ShieldCheck, Smartphone, Trash2, Users, Wrench, X, Zap, MessageCircle,
 } from "lucide-react";
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useForm, useWatch } from "react-hook-form";
@@ -31,6 +32,9 @@ import {
   type ProductCategory, type ProductLine, type Sale, type ServiceJob, type ServiceStatus, type ServiceVendor, type VendorService, type ShopSettings, type WorkspaceData, type WorkspaceIdentity,
 } from "./lib/types";
 import { customerSchema, loginSchema, saleSchema, serviceFormSchema, serviceSchema, serviceVendorSchema, vendorServiceFormSchema } from "./lib/validation";
+
+const BRAND_LOGO_PATH = "/ah-mobiles-logo.png";
+const NAV_BRAND_LOGO_PATH = "/ah-mobiles-logo-nav.png";
 
 const NAV = [
   { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
@@ -1351,7 +1355,7 @@ export default function Workspace() {
         canEdit={canEditModule("vendors")}
       />
     : route === "customers"
-    ? <CustomersPage customers={data.customers} sales={data.sales} services={data.services}
+    ? <CustomersPage customers={data.customers} sales={data.sales} services={data.services} vendors={data.vendors}
         search={globalSearch} onSearch={setGlobalSearch} onAdd={addCustomerDialog}
         selectedId={routeId} onView={(id) => navigate(id ? `/customers/${id}` : "/customers")}
         onEdit={editCustomerDialog} />
@@ -1390,8 +1394,7 @@ export default function Workspace() {
       {menuOpen && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
         <div className="brand-row">
-          <div className="brand-mark"><Smartphone size={19} strokeWidth={2.6} /></div>
-          <span className="brand-name">{data.settings.shopName || "AH Mobiles"}</span>
+          <Image className="brand-logo" src={NAV_BRAND_LOGO_PATH} alt="AH Mobiles" width={192} height={128} priority />
           <button className="icon-btn sidebar-close" aria-label="Close menu" onClick={() => setMenuOpen(false)}><X size={18} /></button>
         </div>
         <div className="sidebar-divider" role="separator" />
@@ -1467,7 +1470,7 @@ function routeTitle(route: string, subroute: string): string {
 }
 
 function AuthLoading() {
-  return <div className="loading-screen"><div className="loading-brand"><div className="brand-mark"><Smartphone size={19} /></div><strong>AH Mobiles</strong></div><div className="loading-spinner" /><span>Getting your workspace ready…</span></div>;
+  return <div className="loading-screen"><div className="loading-brand"><Image className="brand-logo" src={NAV_BRAND_LOGO_PATH} alt="AH Mobiles" width={144} height={96} priority /></div><div className="loading-spinner" /><span>Getting your workspace ready…</span></div>;
 }
 
 function AuthScreen({ error, disabled = false, onSubmit }: {
@@ -1481,7 +1484,7 @@ function AuthScreen({ error, disabled = false, onSubmit }: {
   });
   return (
     <div className="auth-page">
-      <div className="auth-aside"><div className="auth-brand"><div className="brand-mark"><Smartphone size={19} /></div><strong>AH Mobiles</strong></div><div className="auth-pitch"><span className="eyebrow">YOUR SHOP, IN SYNC</span><h1>Everything your shop needs.<br /><span>All in one place.</span></h1><p>Keep sales moving, repairs on track, and every customer feeling looked after.</p><div className="auth-points"><span><Check size={15} /> Sales & service billing</span><span><Check size={15} /> Customer & payment history</span><span><Check size={15} /> Reports that make sense</span></div></div><div className="auth-aside-foot">Simple tools. Better business.</div></div>
+      <div className="auth-aside"><div className="auth-brand"><Image className="brand-logo" src={NAV_BRAND_LOGO_PATH} alt="AH Mobiles" width={180} height={120} priority /></div><div className="auth-pitch"><span className="eyebrow">YOUR SHOP, IN SYNC</span><h1>Everything your shop needs.<br /><span>All in one place.</span></h1><p>Keep sales moving, repairs on track, and every customer feeling looked after.</p><div className="auth-points"><span><Check size={15} /> Sales & service billing</span><span><Check size={15} /> Customer & payment history</span><span><Check size={15} /> Reports that make sense</span></div></div><div className="auth-aside-foot">Simple tools. Better business.</div></div>
       <div className="auth-main"><form className="auth-form" onSubmit={handleSubmit(({ username, password }) => onSubmit(username, password))}>
         <span className="eyebrow">ADMIN & EMPLOYEE ACCESS</span><h2>Welcome back</h2><p>Sign in with your username or admin email.</p>
         <label className="field-label">Username or admin email<input className="input" type="text" autoComplete="username" placeholder="Username or email" disabled={disabled} {...register("username")} /></label>{errors.username && <span className="field-error">{errors.username.message}</span>}
@@ -2564,8 +2567,8 @@ function InvoicePreview({ sale, settings }: { sale: Sale; settings: ShopSettings
   return <div className="panel invoice-sheet">
     <div className="invoice-brand">
       <div className="invoice-brand-info">
-        {settings.logoDataUrl && <div className="invoice-logo" role="img" aria-label="Shop logo" style={{ backgroundImage: `url("${settings.logoDataUrl}")` }} />}
-        <div className="invoice-shop-info"><strong>{settings.shopName}</strong><span>{settings.address || "Shop address not set"}</span><span>{settings.phone || "Contact number not set"}</span>{settings.gstin && <span>GSTIN: {settings.gstin}</span>}</div>
+        <div className="invoice-logo" role="img" aria-label="AH Mobiles logo" style={{ backgroundColor: settings.logoDataUrl ? "#fff" : "#000", backgroundImage: `url("${settings.logoDataUrl || BRAND_LOGO_PATH}")` }} />
+        <div className="invoice-shop-info"><span>{settings.address || "Shop address not set"}</span><span>{settings.phone || "Contact number not set"}</span>{settings.gstin && <span>GSTIN: {settings.gstin}</span>}</div>
       </div>
       <div className="invoice-label"><strong>INVOICE</strong><span>{sale.invoiceNumber}</span><small>{dateLabel(sale.invoiceDate)}</small></div>
     </div>
@@ -2583,18 +2586,43 @@ function InvoicePreview({ sale, settings }: { sale: Sale; settings: ShopSettings
   </div>;
 }
 
-function downloadInvoice(sale: Sale, settings: ShopSettings) {
-  const pdf = new jsPDF();
-  const shopTextX = settings.logoDataUrl ? 38 : 16;
-  if (settings.logoDataUrl) {
-    const format = settings.logoDataUrl.startsWith("data:image/png") ? "PNG" : "JPEG";
-    pdf.addImage(settings.logoDataUrl, format, 16, 12, 16, 16);
+async function loadLogoDataUrl(source: string): Promise<string> {
+  if (source.startsWith("data:image/")) return source;
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("Could not prepare the AH Mobiles logo for the invoice."));
+        return;
+      }
+      context.drawImage(image, 0, 0);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    image.onerror = () => reject(new Error("Could not load the AH Mobiles logo for the invoice."));
+    image.src = source;
+  });
+}
+
+async function downloadInvoice(sale: Sale, settings: ShopSettings) {
+  let logoData: string;
+  try {
+    logoData = await loadLogoDataUrl(settings.logoDataUrl || BRAND_LOGO_PATH);
+  } catch (reason) {
+    window.alert(reason instanceof Error ? reason.message : "Could not load the invoice logo.");
+    return;
   }
-  pdf.setFont("helvetica", "bold"); pdf.setFontSize(18); pdf.text(settings.shopName || "Mobile Shop", shopTextX, 20);
+  const pdf = new jsPDF();
+  const shopTextX = 72;
+  const logoFormat = logoData.startsWith("data:image/png") ? "PNG" : "JPEG";
+  pdf.addImage(logoData, logoFormat, 16, 8, 48, 32);
   pdf.setFont("helvetica", "normal"); pdf.setFontSize(9);
-  if (settings.address) pdf.text(settings.address, shopTextX, 27);
-  if (settings.phone) pdf.text(`Phone: ${settings.phone}`, shopTextX, 32);
-  if (settings.gstin) pdf.text(`GSTIN: ${settings.gstin}`, shopTextX, 37);
+  if (settings.address) pdf.text(settings.address, shopTextX, 20, { maxWidth: 105 });
+  if (settings.phone) pdf.text(`Phone: ${settings.phone}`, shopTextX, 27);
+  if (settings.gstin) pdf.text(`GSTIN: ${settings.gstin}`, shopTextX, 33);
   pdf.setFont("helvetica", "bold"); pdf.setFontSize(14); pdf.text("SALES INVOICE", 194, 20, { align: "right" });
   pdf.setFont("helvetica", "normal"); pdf.setFontSize(10); pdf.text(sale.invoiceNumber, 194, 27, { align: "right" }); pdf.text(dateLabel(sale.invoiceDate), 194, 33, { align: "right" });
   pdf.setDrawColor(225, 230, 238); pdf.line(16, 43, 194, 43);
@@ -2644,17 +2672,20 @@ function printInvoice(sale: Sale, settings: ShopSettings) {
     ? "<th>PRODUCT</th><th>QTY</th><th>TOTAL</th>"
     : "<th>PRODUCT</th><th>IMEI</th><th>QTY</th><th>RATE</th><th>DISCOUNT</th><th>TOTAL</th>";
   const pageSize = thermal ? "80mm auto;margin:5mm" : "A4;margin:16mm";
-  const bodyLayout = thermal ? "body{width:70mm;padding:0}.head{gap:8px}.head h2{font-size:16px}table{margin:18px 0}th,td{padding:5px 2px;font-size:10px}aside{width:100%}.sign{margin-top:42px}" : "body{padding:32px}.head{padding-bottom:18px}table{margin:28px 0}th,td{padding:10px 6px}aside{margin-left:auto;width:260px}.sign{margin-top:64px}";
-  const logo = settings.logoDataUrl ? `<img class="shop-logo" src="${escapeHtml(settings.logoDataUrl)}" alt="">` : "";
+  const bodyLayout = thermal ? "body{width:70mm;padding:0}.head{gap:8px}.head h2{font-size:16px}.shop-logo{width:80px;height:53px}table{margin:18px 0}th,td{padding:5px 2px;font-size:10px}aside{width:100%}.sign{margin-top:42px}" : "body{padding:32px}.head{padding-bottom:18px}.shop-logo{width:120px;height:80px}table{margin:28px 0}th,td{padding:10px 6px}aside{margin-left:auto;width:260px}.sign{margin-top:64px}";
+  const logoBackground = settings.logoDataUrl ? "#fff" : "#000";
+  const logo = `<img class="shop-logo" style="background:${logoBackground}" src="${escapeHtml(settings.logoDataUrl || BRAND_LOGO_PATH)}" alt="AH Mobiles">`;
   const gstin = settings.gstin ? `<div class="muted">GSTIN: ${escapeHtml(settings.gstin)}</div>` : "";
-  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:13px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #ddd}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:40px;height:40px;object-fit:contain}.muted{color:#666;font-size:12px}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #ddd}th:not(:last-child),td:not(:last-child){border-right:1px solid #ddd}th{font-size:10px;color:#666}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #bbb;padding-top:10px}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><h2>${escapeHtml(settings.shopName)}</h2><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}${sale.customerAddress ? `<br>${escapeHtml(sale.customerAddress)}` : ""}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p>${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
+  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:13px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #ddd}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:120px;height:80px;object-fit:contain;background:#000;border-radius:4px}.muted{color:#666;font-size:12px}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #ddd}th:not(:last-child),td:not(:last-child){border-right:1px solid #ddd}th{font-size:10px;color:#666}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #bbb;padding-top:10px}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}${sale.customerAddress ? `<br>${escapeHtml(sale.customerAddress)}` : ""}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p>${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
   popup.document.close();
 }
 
 function printReceipt(service: ServiceJob, settings: ShopSettings) {
   const popup = window.open("", "_blank", "width=500,height=720");
   if (!popup) { window.alert("Please allow pop-ups to print this receipt."); return; }
-  popup.document.write(`<html><head><title>${escapeHtml(service.serviceNumber)}</title><style>body{font:13px Arial;padding:24px;color:#111}h2{margin-bottom:4px}p{line-height:1.55}.line{border-top:1px dashed #888;margin:18px 0}.sign{margin-top:42px}@media print{@page{size:80mm auto;margin:5mm}}</style></head><body><h2>${escapeHtml(settings.shopName)}</h2><p>${escapeHtml(settings.address)}<br>${escapeHtml(settings.phone)}<br>Service receipt · ${escapeHtml(service.serviceNumber)}<br>In date: ${dateLabel(service.inDate)}</p><div class="line"></div><p><strong>${escapeHtml(service.customerName)}</strong><br>${escapeHtml(service.contactNumber)}${service.customerAddress ? `<br>${escapeHtml(service.customerAddress)}` : ""}<br>${escapeHtml(deviceLabel(service))}<br>IMEI: ${escapeHtml(service.imei || "—")}</p><p>Reported fault: ${escapeHtml(service.reportedFault)}<br>Condition: ${escapeHtml(service.receivedConditions.join(", "))}</p><div class="line"></div><p>Estimate: ${money(service.serviceAmount - service.discount)}<br>Advance: ${money(servicePaid(service))}<br>Balance: ${money(serviceDue(service))}</p><p>Device passwords and patterns are never printed.</p><p class="sign">Customer acknowledgment __________________</p><script>window.onload=()=>window.print()</script></body></html>`);
+  const logo = escapeHtml(settings.logoDataUrl || BRAND_LOGO_PATH);
+  const logoBackground = settings.logoDataUrl ? "#fff" : "#000";
+  popup.document.write(`<html><head><title>${escapeHtml(service.serviceNumber)}</title><style>body{font:13px Arial;padding:24px;color:#111}.brand{text-align:center}.shop-logo{width:48px;height:32px;object-fit:contain;background:#000;border-radius:4px}h2{margin:4px 0}p{line-height:1.55}.line{border-top:1px dashed #888;margin:18px 0}.sign{margin-top:42px}@media print{@page{size:80mm auto;margin:5mm}}</style></head><body><div class="brand"><img class="shop-logo" style="background:${logoBackground}" src="${logo}" alt="AH Mobiles"></div><p>${escapeHtml(settings.address)}<br>${escapeHtml(settings.phone)}<br>Service receipt · ${escapeHtml(service.serviceNumber)}<br>In date: ${dateLabel(service.inDate)}</p><div class="line"></div><p><strong>${escapeHtml(service.customerName)}</strong><br>${escapeHtml(service.contactNumber)}${service.customerAddress ? `<br>${escapeHtml(service.customerAddress)}` : ""}<br>${escapeHtml(deviceLabel(service))}<br>IMEI: ${escapeHtml(service.imei || "—")}</p><p>Reported fault: ${escapeHtml(service.reportedFault)}<br>Condition: ${escapeHtml(service.receivedConditions.join(", "))}</p><div class="line"></div><p>Estimate: ${money(service.serviceAmount - service.discount)}<br>Advance: ${money(servicePaid(service))}<br>Balance: ${money(serviceDue(service))}</p><p>Device passwords and patterns are never printed.</p><p class="sign">Customer acknowledgment __________________</p><script>window.onload=()=>window.print()</script></body></html>`);
   popup.document.close();
 }
 
@@ -2666,7 +2697,8 @@ function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceT
   const total = service.returnOutcome === "Not repaired" ? 0 : service.serviceAmount - service.discount;
   const paid = servicePaid(service);
   const due = serviceDue(service);
-  const logo = settings.logoDataUrl ? `<img class="shop-logo" src="${escapeHtml(settings.logoDataUrl)}" alt="">` : "";
+  const logoBackground = settings.logoDataUrl ? "#fff" : "#000";
+  const logo = `<img class="shop-logo" style="background:${logoBackground}" src="${escapeHtml(settings.logoDataUrl || BRAND_LOGO_PATH)}" alt="AH Mobiles">`;
   const gstin = settings.gstin ? `<div class="muted">GSTIN: ${escapeHtml(settings.gstin)}</div>` : "";
 
   const paymentRows = (service.payments && service.payments.length > 0)
@@ -2678,7 +2710,7 @@ function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceT
     body { font: 12px/1.35 'Courier New', Courier, monospace, Arial, sans-serif; color: #000; width: 70mm; margin: 0 auto; padding: 4px 0; }
     .text-center { text-align: center; }
     .head { text-align: center; margin-bottom: 6px; }
-    .shop-logo { width: 44px; height: 44px; object-fit: contain; margin: 0 auto 4px; display: block; }
+    .shop-logo { width: 80px; height: 53px; object-fit: contain; background: #000; border-radius: 4px; margin: 0 auto 4px; display: block; }
     h2 { font-size: 16px; margin: 2px 0; font-weight: bold; letter-spacing: -0.3px; }
     .muted { color: #222; font-size: 11px; line-height: 1.3; }
     .divider { border-top: 1px dashed #000; margin: 6px 0; }
@@ -2708,7 +2740,7 @@ function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceT
     body { font: 13px/1.5 Arial, sans-serif; color: #111; padding: 32px; max-width: 800px; margin: 0 auto; }
     .head { display: flex; justify-content: space-between; border-bottom: 1px solid #ddd; padding-bottom: 18px; margin-bottom: 18px; }
     .shop { display: flex; align-items: flex-start; gap: 12px; }
-    .shop-logo { width: 48px; height: 48px; object-fit: contain; }
+    .shop-logo { width: 120px; height: 80px; object-fit: contain; background: #000; border-radius: 4px; }
     h2 { font-size: 20px; margin: 0 0 4px; }
     .muted { color: #666; font-size: 12px; }
     .meta-block { text-align: right; }
@@ -2740,7 +2772,6 @@ function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceT
   ${thermal ? `
     <div class="head">
       ${logo}
-      <h2>${escapeHtml(settings.shopName || "AH Mobiles")}</h2>
       ${settings.address ? `<div class="muted">${escapeHtml(settings.address)}</div>` : ""}
       ${settings.phone ? `<div class="muted">Phone: ${escapeHtml(settings.phone)}</div>` : ""}
       ${gstin}
@@ -2782,7 +2813,6 @@ function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceT
       <div class="shop">
         ${logo}
         <div>
-          <h2>${escapeHtml(settings.shopName || "AH Mobiles")}</h2>
           ${settings.address ? `<div class="muted">${escapeHtml(settings.address)}</div>` : ""}
           ${settings.phone ? `<div class="muted">Phone: ${escapeHtml(settings.phone)}</div>` : ""}
           ${gstin}
@@ -2868,11 +2898,20 @@ function InvoiceModal({ sale, settings, onClose }: { sale: Sale; settings: ShopS
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="modal-box invoice-modal"><div className="modal-header"><div><span className="eyebrow">LIVE PREVIEW</span><h2>{sale.invoiceNumber}</h2></div><button className="icon-btn" onClick={onClose} aria-label="Close preview"><X size={18} /></button></div><InvoicePreview sale={sale} settings={settings} /><div className="modal-footer"><Button variant="secondary" onClick={() => downloadInvoice(sale, settings)}><Download size={15} /> Download PDF</Button><Button onClick={() => printInvoice(sale, settings)}><Printer size={15} /> Print</Button></div></div></div>;
 }
 
-function downloadServiceReceipt(service: ServiceJob, settings: ShopSettings) {
+async function downloadServiceReceipt(service: ServiceJob, settings: ShopSettings) {
+  let logoData: string;
+  try {
+    logoData = await loadLogoDataUrl(settings.logoDataUrl || BRAND_LOGO_PATH);
+  } catch (reason) {
+    window.alert(reason instanceof Error ? reason.message : "Could not load the service receipt logo.");
+    return;
+  }
   const pdf = new jsPDF({ unit: "mm", format: [80, 190] });
-  pdf.setFontSize(15); pdf.setFont("helvetica", "bold"); pdf.text(settings.shopName || "Mobile Shop", 7, 12);
-  pdf.setFont("helvetica", "normal"); pdf.setFontSize(9); pdf.text(`Service receipt · ${service.serviceNumber}`, 7, 20);
-  let y = 26;
+  const logoFormat = logoData.startsWith("data:image/png") ? "PNG" : "JPEG";
+  pdf.addImage(logoData, logoFormat, 26, 3, 28, 19);
+  pdf.setFontSize(12); pdf.setFont("helvetica", "bold"); pdf.text(settings.shopName || "AH Mobiles", 40, 33, { align: "center" });
+  pdf.setFont("helvetica", "normal"); pdf.setFontSize(9); pdf.text(`Service receipt · ${service.serviceNumber}`, 40, 39, { align: "center" });
+  let y = 45;
   pdf.setFontSize(8);
   if (settings.address) { pdf.text(settings.address.slice(0, 72), 7, y); y += 5; }
   if (settings.phone) { pdf.text(settings.phone, 7, y); y += 5; }
@@ -2894,8 +2933,8 @@ function downloadServiceReceipt(service: ServiceJob, settings: ShopSettings) {
   pdf.save(`${service.serviceNumber}.pdf`);
 }
 
-function CustomersPage({ customers, sales, services, search, onSearch, onAdd, selectedId, onView, onEdit }: {
-  customers: Customer[]; sales: Sale[]; services: ServiceJob[]; search: string; onSearch: (value: string) => void;
+function CustomersPage({ customers, sales, services, vendors, search, onSearch, onAdd, selectedId, onView, onEdit }: {
+  customers: Customer[]; sales: Sale[]; services: ServiceJob[]; vendors: ServiceVendor[]; search: string; onSearch: (value: string) => void;
   onAdd: () => void; selectedId: string; onView: (id: string) => void; onEdit: (customer: Customer) => void;
 }) {
   if (selectedId) {
@@ -2972,7 +3011,7 @@ function CustomersPage({ customers, sales, services, search, onSearch, onAdd, se
 const serviceCustomerIds = new Set(services.map((service) => service.customerId));
 
 const vendorCustomerIds = new Set(
-  services.map((service) => service.customerId)
+  services.filter((service) => service.vendorId).map((service) => service.customerId)
 );
 
 const customerTypeIds =
@@ -3065,7 +3104,7 @@ const filtered = customers.filter((customer) => {
     (service) => service.customerId === customer.id
   );
 
-  const ownVendorServices = ownServices;
+  const ownVendorServices = ownServices.filter((service) => service.vendorId);
 
   const spend =
     ownSales.reduce((sum, sale) => sum + sale.finalAmount, 0) +
@@ -3137,11 +3176,10 @@ const filtered = customers.filter((customer) => {
         <>
           <td>{ownVendorServices.length}</td>
           <td>
-            {ownVendorServices.map((service) => (
-              <div key={service.id}>
-                {service.brand} {service.mobileModel}
-              </div>
-            ))}
+            {ownVendorServices.map((service) => {
+              const vendor = vendors.find((item) => item.id === service.vendorId);
+              return <div key={service.id}>{vendor?.name || "Vendor not found"}</div>;
+            })}
           </td>
           <td>
             {ownVendorServices.map((service) => (
@@ -3311,7 +3349,18 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
           </div>
         </div>
         {filteredVendorServices.length
-          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}><td><button className="table-primary-link" onClick={() => onEditService(service)} title="View customer & product details">{service.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(service.inDate)}</span></td><td>{service.customerName}</td><td><strong>{service.brand} {service.mobileModel}</strong></td><td>{service.customerNumber}</td><td>{service.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned" || service.returnOutcome === "Not repaired"} aria-label={`Update status for ${service.serviceNumber}`} title={service.status === "Returned" || service.returnOutcome === "Not repaired" ? "This vendor service has already been returned and its status is locked." : undefined} onChange={(event) => { if (event.target.value === "__not_repaired__") onMarkNotRepaired(service); else onStatusChange(service, event.target.value as ServiceStatus); }}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}<option value="__not_repaired__">Not repaired · Return device</option></select>}</td><td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td><td>{service.deliveryCustomer || "—"}</td><td><strong>{money(service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge)}</strong></td>          <td><WhatsAppAction phone={service.customerNumber} customerName={service.customerName} /><button className="row-action" aria-label="View vendor service details" title="View details" onClick={() => onEditService(service)}><ArrowRight size={15} /></button>{canEdit && <button className="row-action" aria-label="Edit vendor service" title="Edit details" onClick={() => onEditService(service)}><Pencil size={15} /></button>}{canEdit && <button className="row-action danger-action" aria-label="Delete vendor service" title="Delete service" onClick={() => onDeleteService(service)}><Trash2 size={15} /></button>}</td></tr>)}</tbody></table></div>
+          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}>
+            <td><button className="table-primary-link" onClick={() => onEditService(service)} title="View customer & product details">{service.serviceNumber}</button></td>
+            <td><span className="muted-cell">{dateLabel(service.inDate)}</span></td>
+            <td>{service.customerName}</td>
+            <td><strong>{service.brand} {service.mobileModel}</strong></td>
+            <td>{service.customerNumber}</td>
+            <td>{service.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned" || service.returnOutcome === "Not repaired"} aria-label={`Update status for ${service.serviceNumber}`} title={service.status === "Returned" || service.returnOutcome === "Not repaired" ? "This vendor service has already been returned and its status is locked." : undefined} onChange={(event) => { if (event.target.value === "__not_repaired__") onMarkNotRepaired(service); else onStatusChange(service, event.target.value as ServiceStatus); }}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}<option value="__not_repaired__">Not repaired · Return device</option></select>}</td>
+            <td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td>
+            <td>{service.deliveryCustomer || "—"}</td>
+            <td><strong>{money(service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge)}</strong></td>
+            <td><WhatsAppAction phone={service.customerNumber} customerName={service.customerName} /><button className="row-action" aria-label="View vendor service details" title="View details" onClick={() => onEditService(service)}><ArrowRight size={15} /></button>{canEdit && <button className="row-action" aria-label="Edit vendor service" title="Edit details" onClick={() => onEditService(service)}><Pencil size={15} /></button>}{canEdit && <button className="row-action danger-action" aria-label="Delete vendor service" title="Delete service" onClick={() => onDeleteService(service)}><Trash2 size={15} /></button>}</td>
+          </tr>)}</tbody></table></div>
           : <EmptyState icon={Wrench} title={servicesForVendor.length ? "No matching vendor services" : "No vendor services yet"} detail={servicesForVendor.length ? "Adjust your search or filters to see matching services." : "Add a service here to save it only under this vendor."} action={!servicesForVendor.length && canEdit ? <Button onClick={() => onCreateService(selectedVendor)}><Plus size={15} /> Add service</Button> : undefined} />}
       </div>
     </>;
@@ -4607,7 +4656,7 @@ function SettingsPage({ settings, identity, canEdit, onSave, onChangePassword }:
             <FormField label="Shop logo (PNG/JPEG, up to 200 KB)">
               <input className="input" type="file" accept="image/png,image/jpeg" onChange={(event) => uploadLogo(event.target.files?.[0])} />
               {logoError && <span className="field-error">{logoError}</span>}
-              {form.logoDataUrl && <div className="settings-logo-row"><div className="settings-logo-preview" role="img" aria-label="Current shop logo" style={{ backgroundImage: `url("${form.logoDataUrl}")` }} /><button type="button" className="text-link" onClick={() => update("logoDataUrl", undefined)}>Remove logo</button></div>}
+              <div className="settings-logo-row"><div className="settings-logo-preview" role="img" aria-label={form.logoDataUrl ? "Current custom shop logo" : "Default AH Mobiles logo"} style={{ backgroundColor: form.logoDataUrl ? "#fff" : "#000", backgroundImage: `url("${form.logoDataUrl || BRAND_LOGO_PATH}")` }} />{form.logoDataUrl && <button type="button" className="text-link" onClick={() => update("logoDataUrl", undefined)}>Use default AH Mobiles logo</button>}</div>
             </FormField>
           </div>
         </section>

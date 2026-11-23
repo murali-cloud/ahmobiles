@@ -22,6 +22,11 @@ export const viewport: Viewport = {
 export const metadata: Metadata = {
   title: "AH Mobiles | Shop Manager",
   description: "Sales, service and customer management for your mobile shop.",
+  icons: {
+    icon: "/ah-mobiles-logo-nav.png",
+    shortcut: "/ah-mobiles-logo-nav.png",
+    apple: "/ah-mobiles-logo-nav.png",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
