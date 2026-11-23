@@ -34,7 +34,7 @@ import {
 import { customerSchema, loginSchema, saleSchema, serviceFormSchema, serviceSchema, serviceVendorSchema, vendorServiceFormSchema } from "./lib/validation";
 
 const BRAND_LOGO_PATH = "/ah-mobiles-logo.png";
-const NAV_BRAND_LOGO_PATH = "/ah-mobiles-logo-nav.png";
+const AUTH_BRAND_LOGO_PATH = "/ah-mobiles-logo-nav.png";
 
 const NAV = [
   { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
@@ -1394,7 +1394,8 @@ export default function Workspace() {
       {menuOpen && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
         <div className="brand-row">
-          <Image className="brand-logo" src={NAV_BRAND_LOGO_PATH} alt="AH Mobiles" width={192} height={128} priority />
+          <div className="brand-mark"><Smartphone size={19} strokeWidth={2.6} /></div>
+          <span className="brand-name">{data.settings.shopName || "AH Mobiles"}</span>
           <button className="icon-btn sidebar-close" aria-label="Close menu" onClick={() => setMenuOpen(false)}><X size={18} /></button>
         </div>
         <div className="sidebar-divider" role="separator" />
@@ -1470,7 +1471,7 @@ function routeTitle(route: string, subroute: string): string {
 }
 
 function AuthLoading() {
-  return <div className="loading-screen"><div className="loading-brand"><Image className="brand-logo" src={NAV_BRAND_LOGO_PATH} alt="AH Mobiles" width={144} height={96} priority /></div><div className="loading-spinner" /><span>Getting your workspace ready…</span></div>;
+  return <div className="loading-screen"><div className="loading-brand"><Image className="brand-logo" src={AUTH_BRAND_LOGO_PATH} alt="AH Mobiles" width={144} height={96} priority /></div><div className="loading-spinner" /><span>Getting your workspace ready…</span></div>;
 }
 
 function AuthScreen({ error, disabled = false, onSubmit }: {
@@ -1484,7 +1485,7 @@ function AuthScreen({ error, disabled = false, onSubmit }: {
   });
   return (
     <div className="auth-page">
-      <div className="auth-aside"><div className="auth-brand"><Image className="brand-logo" src={NAV_BRAND_LOGO_PATH} alt="AH Mobiles" width={180} height={120} priority /></div><div className="auth-pitch"><span className="eyebrow">YOUR SHOP, IN SYNC</span><h1>Everything your shop needs.<br /><span>All in one place.</span></h1><p>Keep sales moving, repairs on track, and every customer feeling looked after.</p><div className="auth-points"><span><Check size={15} /> Sales & service billing</span><span><Check size={15} /> Customer & payment history</span><span><Check size={15} /> Reports that make sense</span></div></div><div className="auth-aside-foot">Simple tools. Better business.</div></div>
+      <div className="auth-aside"><div className="auth-brand"><Image className="brand-logo" src={AUTH_BRAND_LOGO_PATH} alt="AH Mobiles" width={180} height={120} priority /></div><div className="auth-pitch"><span className="eyebrow">YOUR SHOP, IN SYNC</span><h1>Everything your shop needs.<br /><span>All in one place.</span></h1><p>Keep sales moving, repairs on track, and every customer feeling looked after.</p><div className="auth-points"><span><Check size={15} /> Sales & service billing</span><span><Check size={15} /> Customer & payment history</span><span><Check size={15} /> Reports that make sense</span></div></div><div className="auth-aside-foot">Simple tools. Better business.</div></div>
       <div className="auth-main"><form className="auth-form" onSubmit={handleSubmit(({ username, password }) => onSubmit(username, password))}>
         <span className="eyebrow">ADMIN & EMPLOYEE ACCESS</span><h2>Welcome back</h2><p>Sign in with your username or admin email.</p>
         <label className="field-label">Username or admin email<input className="input" type="text" autoComplete="username" placeholder="Username or email" disabled={disabled} {...register("username")} /></label>{errors.username && <span className="field-error">{errors.username.message}</span>}
