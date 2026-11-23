@@ -89,3 +89,16 @@ export function updateLocalVendorService(data: WorkspaceData, service: VendorSer
 export function patchSettings(data: WorkspaceData, settings: ShopSettings): WorkspaceData {
   return { ...data, settings };
 }
+
+export function deleteLocalRecord(
+  data: WorkspaceData,
+  kind: "sales" | "services" | "customers",
+  id: string,
+): WorkspaceData {
+  const records = data[kind] as Array<Sale | ServiceJob | Customer>;
+  return { ...data, [kind]: records.filter((item) => item.id !== id) };
+}
+
+export function deleteLocalVendorService(data: WorkspaceData, id: string): WorkspaceData {
+  return { ...data, vendorServices: data.vendorServices.filter((item) => item.id !== id) };
+}

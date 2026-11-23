@@ -183,6 +183,9 @@ a { color: inherit; text-decoration: none; }
 .due-text { display: block; margin-top: 4px; color: #c16f34 !important; font-size: 14px !important; font-weight: 550 !important; }
 .row-action { display: inline-grid; width: 25px; height: 25px; place-items: center; margin-left: 2px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #8e99a9; }
 .row-action:hover { border-color: #e7eaf0; background: #fff; color: #476fe5; }
+.row-action.whatsapp-action { color: #25a85a; }
+.row-action.whatsapp-action:hover { border-color: #ccebd8; background: #f1fbf4; color: #128c47; }
+.row-action.whatsapp-action:disabled { opacity: .4; cursor: not-allowed; }
 .row-action.danger-action { color: #c44751; }
 .row-action.danger-action:hover { border-color: #f1d7d9; background: #fff8f8; color: #b3323d; }
 .status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; border-radius: 4px; background: #f0f3f8; color: #6e7889; font-size: 14px; font-weight: 600; }
@@ -254,6 +257,15 @@ a { color: inherit; text-decoration: none; }
 .input.read-only { display: flex; align-items: center; justify-content: space-between; }
 .read-only > span { color: #9aa3b2; font-size: 14px; }
 .textarea { height: auto; min-height: 76px; padding: 9px 10px; resize: vertical; line-height: 1.5; }
+.imei-input-wrap { display: flex; min-width: 0; gap: 6px; }
+.imei-input-wrap > .input { flex: 1; }
+.scan-barcode-button { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; gap: 5px; padding: 0 9px; border: 1px solid #e1e6ee; border-radius: 6px; background: #fff; color: #53617a; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.scan-barcode-button:hover { border-color: #b8c5e1; background: #f7f9fd; color: #345fc8; }
+.product-fields .scan-barcode-button { min-height: 44px; padding: 0 7px; font-size: 12px; }
+.barcode-scanner-modal { max-width: 560px; }
+.barcode-scanner-content { display: grid; gap: 11px; padding: 16px 20px; }
+.barcode-scanner-video { width: 100%; max-height: 58vh; aspect-ratio: 4 / 3; border-radius: 8px; background: #101828; object-fit: cover; }
+.barcode-scanner-error { margin: 0; color: #ad3945; font-size: 14px; line-height: 1.5; }
 .field-error { color: #c24e58; font-size: 14px; font-weight: 500; }
 .field-hint { display: flex; align-items: center; gap: 4px; color: #218669; font-size: 14px; font-weight: 500; }
 .product-list { display: grid; gap: 12px; }
@@ -347,10 +359,13 @@ a { color: inherit; text-decoration: none; }
 .invoice-customer > span { color: #9aa3b2; font-size: 14px; font-weight: 700; letter-spacing: .7px; }
 .invoice-customer strong { color: #3b475c; font-size: 14px; }
 .invoice-customer small { color: #8791a1; font-size: 14px; }
-.invoice-table { width: 100%; border-collapse: collapse; text-align: left; white-space: nowrap; }
+.invoice-table { width: 100%; min-width: 720px; border-collapse: collapse; text-align: left; white-space: nowrap; }
 .invoice-table th { padding: 8px 5px; border-top: 1px solid #edf0f4; border-bottom: 1px solid #edf0f4; color: #9aa3b2; font-size: 14px; letter-spacing: .4px; }
 .invoice-table td { padding: 10px 5px; border-bottom: 1px solid #f0f2f5; color: #7b8698; font-size: 14px; }
 .invoice-table td strong { color: #48546a; font-size: 14px; font-weight: 600; }
+.invoice-table th:not(:last-child), .invoice-table td:not(:last-child) { border-right: 1px solid #e8ebf0; }
+.invoice-table th:nth-child(3), .invoice-table td:nth-child(3) { text-align: center; }
+.invoice-table th:nth-child(n+4), .invoice-table td:nth-child(n+4) { text-align: right; }
 .invoice-totals { display: grid; width: min(230px, 100%); gap: 8px; margin: 13px 0 0 auto; }
 .invoice-totals span { display: flex; justify-content: space-between; color: #8a94a4; font-size: 14px; }
 .invoice-totals strong { color: #536076; font-size: 14px; font-weight: 620; }
@@ -368,6 +383,11 @@ a { color: inherit; text-decoration: none; }
 .customer-profile-head > div:nth-child(2) { display: flex; flex: 1; flex-direction: column; gap: 5px; }
 .customer-profile-head h2 { margin: 0; color: #344057; font-size: 16px; }
 .customer-profile-head > div:nth-child(2) span { color: #929cad; font-size: 14px; }
+.customer-contact-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: #748096; font-size: 14px; }
+.customer-contact-row a { color: #53617a; text-decoration: none; }
+.customer-contact-row a:hover { color: #315fe7; text-decoration: underline; }
+.customer-profile-head .customer-contact-row .whatsapp-action { width: 44px; height: 44px; }
+.customer-profile-address { overflow-wrap: anywhere; }
 .customer-profile-stats { display: flex; gap: 21px; }
 .customer-profile-stats > span { display: flex; flex-direction: column; gap: 4px; color: #9aa3b2; font-size: 14px; }
 .customer-profile-stats strong { color: #455168; font-size: 14px; }

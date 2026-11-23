@@ -17,29 +17,29 @@ export type WorkspaceIdentity = { uid: string; shopId: string; email: string | n
 export const NO_EMPLOYEE_PERMISSIONS: EmployeePermissions = { overview: "none", sales: "none", services: "none", vendors: "none", ready: "none", customers: "none", reports: "none", settings: "none" };
 export const ADMIN_PERMISSIONS: EmployeePermissions = { overview: "edit", sales: "edit", services: "edit", vendors: "edit", ready: "edit", customers: "edit", reports: "edit", settings: "edit" };
 export type Payment = { id: string; amount: number; date: string; notes?: string };
-export type Customer = { id: string; name: string; phone: string; email?: string; createdAt: string };
+export type Customer = { id: string; name: string; phone: string; email?: string; address?: string; createdAt: string };
 export type ServiceVendor = { id: string; name: string; phone: string; createdAt: string };
 export type VendorService = {
   id: string; vendorId: string; serviceNumber: string; inDate: string; customerName: string;
-  brand: string; mobileModel: string; customerNumber: string; status: ServiceStatus;
+  brand: string; mobileModel: string; customerNumber: string; customerAddress?: string; status: ServiceStatus;
   returnOutcome?: "Not repaired";
   receivedCondition: string; fault?: string; deliveryDate?: string; deliveryCustomer?: string;
-  serviceCharge: number; createdAt: string;
+  serviceCharge: number; tax?: number; createdAt: string;
 };
 export type ProductCategory = "Electronics" | "Accessories";
 export type ProductLine = { id: string; category?: ProductCategory; brand: string; model: string; productName?: string; imei: string; quantity: number; rate: number; discount: number };
-export type Sale = { id: string; invoiceNumber: string; customerId: string; customerName: string; contactNumber: string; invoiceDate: string; products: ProductLine[]; subtotal: number; discount: number; tax: number; finalAmount: number; payments: Payment[]; createdAt: string };
+export type Sale = { id: string; invoiceNumber: string; customerId: string; customerName: string; contactNumber: string; customerAddress?: string; invoiceDate: string; products: ProductLine[]; subtotal: number; discount: number; tax: number; finalAmount: number; payments: Payment[]; createdAt: string };
 export type ServiceJob = {
-  id: string; serviceNumber: string; vendorId?: string; customerId: string; customerName: string; contactNumber: string;
+  id: string; serviceNumber: string; vendorId?: string; customerId: string; customerName: string; contactNumber: string; customerAddress?: string;
   inDate: string; category?: ProductCategory; brand: string; mobileModel: string; productName?: string; imei: string; reportedFault: string; technicianNotes: string;
   receivedConditions: string[]; remarks: string; status: ServiceStatus; serviceAmount: number; discount: number;
-  finalAmount: number; payments: Payment[]; refunds?: ServiceRefund[]; returnOutcome?: "Repaired" | "Not repaired";
+  tax?: number; finalAmount: number; payments: Payment[]; refunds?: ServiceRefund[]; returnOutcome?: "Repaired" | "Not repaired";
   refundAmount?: number; readyAt?: string; deliveryOutDate?: string; deliveryOutPerson?: string;
   deliveryOutStaff?: string; deliveryOutStaffId?: string; deliveryRemarks?: string;
   deliveryHistory?: Array<{ date: string; person: string; staff?: string; staffId?: string; remarks: string }>;
   createdAt: string;
 };
-export type ShopSettings = { shopName: string; ownerName: string; phone: string; email: string; address: string; gstin: string; logoDataUrl?: string; invoicePaperSize: "A4" | "Thermal"; invoiceFooter: string; salesPrefix: string; servicePrefix: string };
+export type ShopSettings = { shopName: string; ownerName: string; phone: string; email: string; address: string; gstin: string; logoDataUrl?: string; invoicePaperSize: "A4" | "Thermal"; invoiceFooter: string; salesPrefix: string; servicePrefix: string; enableTax?: boolean };
 export type WorkspaceData = { sales: Sale[]; services: ServiceJob[]; customers: Customer[]; vendors: ServiceVendor[]; vendorServices: VendorService[]; settings: ShopSettings };
-export const DEFAULT_SETTINGS: ShopSettings = { shopName: "AHMobiles", ownerName: "Shop owner", phone: "", email: "", address: "", gstin: "", invoicePaperSize: "A4", invoiceFooter: "Thank you for choosing AHMobiles.", salesPrefix: "SAL", servicePrefix: "SERV" };
+export const DEFAULT_SETTINGS: ShopSettings = { shopName: "AHMobiles", ownerName: "Shop owner", phone: "", email: "", address: "", gstin: "", invoicePaperSize: "A4", invoiceFooter: "Thank you for choosing AHMobiles.", salesPrefix: "SAL", servicePrefix: "SERV", enableTax: true };
 export const EMPTY_WORKSPACE: WorkspaceData = { sales: [], services: [], customers: [], vendors: [], vendorServices: [], settings: DEFAULT_SETTINGS };

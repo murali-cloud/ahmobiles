@@ -2,15 +2,15 @@ import { z } from "zod";
 const money = z.coerce.number().finite().min(0, "Enter a valid amount.");
 const phone = z.string().trim().min(7, "Enter a valid contact number.").max(20);
 export const loginSchema = z.object({ username: z.string().trim().min(3, "Enter your username or email."), password: z.string().min(8, "Use at least 8 characters.") });
-export const customerSchema = z.object({ name: z.string().trim().min(2, "Enter the customer's name."), phone, email: z.union([z.literal(""), z.string().trim().email("Enter a valid email address.")]) });
+export const customerSchema = z.object({ name: z.string().trim().min(2, "Enter the customer's name."), phone, email: z.union([z.literal(""), z.string().trim().email("Enter a valid email address.")]), address: z.string().trim().max(500, "Address must be 500 characters or fewer.") });
 export const serviceVendorSchema = z.object({ name: z.string().trim().min(2, "Enter the vendor name.").max(120), phone });
 export const vendorServiceFormSchema = z.object({
   serviceNumber: z.string().trim().min(1, "Enter the service bill number.").max(120), inDate: z.string().min(1, "Choose an intake date."),
-  customerName: z.string().trim().min(2, "Enter the customer's name."), brand: z.string().trim().min(1, "Enter the device brand."),
+  customerName: z.string().trim().min(2, "Enter the customer's name."), customerAddress: z.string().trim().max(500), brand: z.string().trim().min(1, "Enter the device brand."),
   mobileModel: z.string().trim().min(1, "Enter the device model."), customerNumber: phone,
   status: z.enum(["Received", "In progress", "Ready", "Returned"]),
   receivedCondition: z.string().trim().min(1, "Enter received condition.").max(200),
-  fault: z.string().trim(), deliveryDate: z.string(), deliveryCustomer: z.string().trim().max(120), serviceCharge: money,
+  fault: z.string().trim(), deliveryDate: z.string(), deliveryCustomer: z.string().trim().max(120), serviceCharge: money, tax: money.optional(),
 });
 export const productSchema = z.object({ id: z.string(), category: z.enum(["Electronics", "Accessories"]).optional(), brand: z.string().trim(), model: z.string().trim(), productName: z.string().trim().optional(), imei: z.string().trim().max(20, "IMEI must be 20 characters or fewer."), quantity: z.coerce.number().int().min(1, "Quantity must be at least one."), rate: money, discount: money }).refine((product) => {
   const cat = product.category ?? "Electronics";
@@ -19,7 +19,7 @@ export const productSchema = z.object({ id: z.string(), category: z.enum(["Elect
   if (cat === "Accessories" && !product.productName?.trim()) return false;
   return true;
 }, { message: "Enter a brand and model for Electronics, or a product name for Accessories.", path: ["brand"] }).refine((product) => product.discount <= product.quantity * product.rate, { message: "Discount cannot exceed the line amount.", path: ["discount"] });
-export const saleSchema = z.object({ invoiceNumber: z.string().trim().min(1, "Enter an invoice number.").max(120, "Invoice number must be 120 characters or fewer."), customerName: z.string().trim().min(2, "Enter the customer's name."), contactNumber: phone, invoiceDate: z.string().min(1, "Choose an invoice date."), products: z.array(productSchema).min(1, "Add at least one product."), discount: money, tax: money, amountPaid: money });
-const serviceFieldsSchema = z.object({ vendorId: z.string().max(128).optional(), customerName: z.string().trim().min(2, "Enter the customer's name."), contactNumber: phone, inDate: z.string().min(1, "Choose an intake date."), category: z.enum(["Electronics", "Accessories"]).optional(), brand: z.string().trim(), mobileModel: z.string().trim(), productName: z.string().trim().optional(), imei: z.string().trim().max(20, "IMEI must be 20 characters or fewer."), reportedFault: z.string().trim().min(3, "Describe the reported fault."), technicianNotes: z.string(), receivedConditions: z.array(z.string()).min(1, "Select at least one condition."), remarks: z.string(), serviceAmount: money, discount: money });
+export const saleSchema = z.object({ invoiceNumber: z.string().trim().min(1, "Enter an invoice number.").max(120, "Invoice number must be 120 characters or fewer."), customerName: z.string().trim().min(2, "Enter the customer's name."), contactNumber: phone, customerAddress: z.string().trim().max(500), invoiceDate: z.string().min(1, "Choose an invoice date."), products: z.array(productSchema).min(1, "Add at least one product."), discount: money, tax: money, amountPaid: money });
+const serviceFieldsSchema = z.object({ vendorId: z.string().max(128).optional(), customerName: z.string().trim().min(2, "Enter the customer's name."), contactNumber: phone, customerAddress: z.string().trim().max(500), inDate: z.string().min(1, "Choose an intake date."), category: z.enum(["Electronics", "Accessories"]).optional(), brand: z.string().trim(), mobileModel: z.string().trim(), productName: z.string().trim().optional(), imei: z.string().trim().max(20, "IMEI must be 20 characters or fewer."), reportedFault: z.string().trim().min(3, "Describe the reported fault."), technicianNotes: z.string(), receivedConditions: z.array(z.string()).min(1, "Select at least one condition."), remarks: z.string(), serviceAmount: money, discount: money, tax: money.optional() });
 export const serviceFormSchema = serviceFieldsSchema.omit({ receivedConditions: true });
 export const serviceSchema = serviceFieldsSchema.refine((value) => value.discount <= value.serviceAmount, { message: "Discount cannot exceed the service amount.", path: ["discount"] });

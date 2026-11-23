@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { getApp, getApps, initializeApp, type FirebaseApp } from "firebase/app";
 import {
@@ -26,7 +26,7 @@ import {
 } from "firebase/firestore";
 import type {
   Customer, EmployeeAccount, EmployeeModule, EmployeePermissions,
-  Payment, Sale, ServiceJob, ServiceVendor, ShopSettings, VendorService, WorkspaceData, WorkspaceIdentity,
+  Payment, ProductCategory, ProductLine, Sale, ServiceJob, ServiceVendor, ShopSettings, VendorService, WorkspaceData, WorkspaceIdentity,
 } from "./types";
 import { ADMIN_PERMISSIONS, DEFAULT_SETTINGS, NO_EMPLOYEE_PERMISSIONS } from "./types";
 
@@ -373,12 +373,87 @@ export async function createVendorService(
 
 export async function updateVendorService(
   serviceId: string,
-  changes: Partial<Pick<VendorService, "status" | "deliveryDate" | "deliveryCustomer" | "serviceCharge" | "returnOutcome">>,
+  changes: Partial<VendorService>,
 ): Promise<void> {
   const payload = await vendorApiRequest("/api/vendor-services", "PATCH", { serviceId, ...changes });
   if (!isRecord(payload) || payload.success !== true) {
     throw new Error("The server did not confirm the vendor service update.");
   }
+}
+
+export async function deleteVendorService(serviceId: string): Promise<void> {
+  const payload = await vendorApiRequest("/api/vendor-services", "DELETE", { serviceId });
+  if (!isRecord(payload) || payload.success !== true) {
+    throw new Error("The server did not confirm the vendor service was deleted.");
+  }
+}
+
+export async function deleteRecord(
+  uid: string,
+  kind: "sales" | "services",
+  recordId: string,
+): Promise<void> {
+  const token = await authenticatedToken();
+  const response = await fetch("/api/records", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ kind, recordId }),
+  });
+  const result = await response.json() as { success?: boolean; error?: string };
+  if (!response.ok || !result.success) throw new Error(result.error || "The record could not be deleted.");
+}
+
+export async function editSaleRecord(
+  uid: string,
+  recordId: string,
+  record: {
+    customerName: string;
+    contactNumber: string;
+    customerAddress: string;
+    invoiceDate: string;
+    products: ProductLine[];
+    subtotal: number;
+    discount: number;
+    tax: number;
+    finalAmount: number;
+  },
+): Promise<void> {
+  await mutateRecord(uid, {
+    action: "edit-sale",
+    recordId,
+    record,
+  });
+}
+
+export async function editServiceRecord(
+  uid: string,
+  recordId: string,
+  record: {
+    customerName: string;
+    contactNumber: string;
+    customerAddress: string;
+    inDate: string;
+    category?: ProductCategory;
+    brand: string;
+    mobileModel: string;
+    productName?: string;
+    imei: string;
+    reportedFault: string;
+    technicianNotes?: string;
+    receivedConditions?: string[];
+    remarks?: string;
+    serviceAmount: number;
+    discount: number;
+    tax?: number;
+    finalAmount: number;
+    vendorId?: string;
+  },
+): Promise<void> {
+  await mutateRecord(uid, {
+    action: "edit-service",
+    recordId,
+    record,
+  });
 }
 
 export async function writeRecord(

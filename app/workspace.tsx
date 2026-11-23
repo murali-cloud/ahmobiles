@@ -4,7 +4,7 @@ import {
   Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3,
   Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ClipboardList,
   Clock3, CreditCard, Download, Eye, EyeOff, FileText, Filter, LayoutDashboard, LogOut, Menu, MoreHorizontal, Store,
-  Pencil, Plus, Printer, Search, Settings, ShieldCheck, Smartphone, Trash2, Users, Wrench, X, Zap,MessageCircle,
+  Pencil, Plus, Printer, ScanLine, Search, Settings, ShieldCheck, Smartphone, Trash2, Users, Wrench, X, Zap, MessageCircle,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -16,11 +16,13 @@ import { jsPDF } from "jspdf";
 import {
   addPayment, changeOwnPassword, changeServiceStatus, changeServiceVendor, createEmployee, createNumberedRecord, createVendorService, deleteServiceVendor as deleteServiceVendorCloud, firebaseConfigured,
   createServiceVendor, listEmployees, listServiceVendors, listVendorServices, loadWorkspaceIdentity, logOut, observeAuth, observeWorkspace, removeEmployee, updateVendorService as updateVendorServiceCloud,
+  deleteVendorService as deleteVendorServiceCloud, deleteRecord, editSaleRecord, editServiceRecord,
   signIn, updateEmployee, writeRecord, writeSettings,
 } from "./lib/firebase";
 import {
   makeCustomer, nextInvoiceNumber, nextVendorServiceNumber, patchSettings, readLocalWorkspace,
   updateLocalRecord, updateLocalVendor, updateLocalVendorService, writeLocalWorkspace,
+  deleteLocalRecord, deleteLocalVendorService,
 } from "./lib/local-data";
 import { normalizePhoneNumber } from "./lib/phone";
 import {
@@ -34,7 +36,7 @@ const NAV = [
   { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
   { label: "Sales", href: "/sales", icon: CreditCard },
   { label: "Services", href: "/services", icon: Wrench },
-  { label: "Ready for delivery", href: "/services/ready", icon: CheckCircle2 },
+  // { label: "Ready for delivery", href: "/services/ready", icon: CheckCircle2 },
   { label: "Service vendors", href: "/vendors", icon: Store },
   { label: "Customers", href: "/customers", icon: Users },
   { label: "Reports", href: "/reports", icon: BarChart3 },
@@ -106,6 +108,173 @@ function dateLabel(value: string): string {
   return new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric" }).format(new Date(value));
 }
 
+function whatsappUrl(phone: string, message?: string): string | undefined {
+  const digits = phone.replace(/\D/g, "");
+  const number = digits.length === 10
+    ? `91${digits}`
+    : digits.startsWith("0") && digits.length === 11
+      ? `91${digits.slice(1)}`
+      : digits;
+  if (number.length < 7) return undefined;
+  return `https://wa.me/${number}${message ? `?text=${encodeURIComponent(message)}` : ""}`;
+}
+
+function WhatsAppAction({ phone, customerName }: { phone: string; customerName: string }) {
+  const url = whatsappUrl(phone);
+  return <button
+    className="row-action whatsapp-action"
+    type="button"
+    disabled={!url}
+    aria-label={`Open WhatsApp chat with ${customerName}`}
+    title={url ? "WhatsApp customer" : "No valid customer contact number"}
+    onClick={() => { if (url) window.open(url, "_blank", "noopener,noreferrer"); }}
+  >
+    <MessageCircle size={15} />
+  </button>;
+}
+
+type BarcodeDetectorResult = { rawValue: string };
+type BrowserBarcodeDetector = { detect: (source: HTMLVideoElement) => Promise<BarcodeDetectorResult[]> };
+type BrowserBarcodeDetectorConstructor = {
+  new(options?: { formats?: string[] }): BrowserBarcodeDetector;
+  getSupportedFormats: () => Promise<string[]>;
+};
+
+function ScanBarcodeButton({ onScan }: { onScan: (value: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  return <>
+    <button className="scan-barcode-button" type="button" onClick={() => setOpen(true)}>
+      <ScanLine size={15} /> Scan
+    </button>
+    {open && <BarcodeScannerModal onClose={close} onDetected={onScan} />}
+  </>;
+}
+
+function BarcodeScannerModal({ onClose, onDetected }: {
+  onClose: () => void;
+  onDetected: (value: string) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const onDetectedRef = useRef(onDetected);
+  const [error, setError] = useState("");
+  const [scanning, setScanning] = useState(false);
+  useEffect(() => {
+    onDetectedRef.current = onDetected;
+  }, [onDetected]);
+
+  useEffect(() => {
+    let active = true;
+    let scanTimer: number | undefined;
+    let stream: MediaStream | undefined;
+    const videoElement = videoRef.current;
+    const stopTracks = () => stream?.getTracks().forEach((track) => track.stop());
+    const stopCamera = () => {
+      stopTracks();
+      if (videoRef.current) videoRef.current.srcObject = null;
+    };
+    const startScanning = async () => {
+      const Detector = (window as Window & { BarcodeDetector?: BrowserBarcodeDetectorConstructor }).BarcodeDetector;
+      if (!Detector) {
+        setError("Camera barcode scanning is not supported in this browser. Use a connected barcode scanner or enter the IMEI manually.");
+        return;
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setError("Camera access is unavailable. Use a connected barcode scanner or enter the IMEI manually.");
+        return;
+      }
+      try {
+        const supportedFormats = await Detector.getSupportedFormats();
+        const formats = ["code_128", "code_39", "code_93", "codabar", "ean_13", "ean_8", "itf", "upc_a", "upc_e", "qr_code", "data_matrix", "pdf417", "aztec"]
+          .filter((format) => supportedFormats.includes(format));
+        if (!formats.length) {
+          setError("This browser cannot read supported barcode formats. Use a connected barcode scanner or enter the IMEI manually.");
+          return;
+        }
+        const detector = new Detector({ formats });
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+        if (!active) {
+          stopTracks();
+          return;
+        }
+        const video = videoElement;
+        if (!video) {
+          stopTracks();
+          return;
+        }
+        video.srcObject = stream;
+        await video.play();
+        if (!active) return;
+        setScanning(true);
+        const scanFrame = async () => {
+          if (!active) return;
+          if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+            scanTimer = window.setTimeout(() => { void scanFrame(); }, 200);
+            return;
+          }
+          try {
+            const results = await detector.detect(video);
+            const value = results.find((result) => result.rawValue.trim())?.rawValue.trim();
+            if (value) {
+              if (value.length > 20) {
+                stopCamera();
+                setScanning(false);
+                setError("The scanned value exceeds 20 characters. Scan the IMEI barcode or enter the value manually.");
+                return;
+              }
+              onDetectedRef.current(value);
+              onClose();
+              return;
+            }
+          } catch (reason) {
+            if (active) {
+              stopCamera();
+              setScanning(false);
+              setError(reason instanceof Error ? reason.message : "The barcode could not be read.");
+            }
+            return;
+          }
+          scanTimer = window.setTimeout(() => { void scanFrame(); }, 200);
+        };
+        void scanFrame();
+      } catch (reason) {
+        stopCamera();
+        if (reason instanceof DOMException && reason.name === "NotAllowedError") {
+          setError("Camera permission was denied. Allow camera access, or use a connected barcode scanner or enter the IMEI manually.");
+        } else {
+          setError(reason instanceof Error ? reason.message : "Could not start the camera scanner.");
+        }
+      }
+    };
+    void startScanning();
+    return () => {
+      active = false;
+      if (scanTimer !== undefined) window.clearTimeout(scanTimer);
+      stopTracks();
+      if (videoElement) videoElement.srcObject = null;
+    };
+  }, [onClose]);
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="modal-box barcode-scanner-modal" role="dialog" aria-modal="true" aria-labelledby="barcode-scanner-title">
+      <div className="modal-header">
+        <div><span className="eyebrow">IMEI SCANNER</span><h2 id="barcode-scanner-title">Scan barcode</h2></div>
+        <button className="icon-btn" type="button" onClick={onClose} aria-label="Close barcode scanner"><X size={18} /></button>
+      </div>
+      <div className="barcode-scanner-content">
+        <video ref={videoRef} className="barcode-scanner-video" autoPlay muted playsInline aria-label="Camera barcode preview" />
+        {error
+          ? <p className="barcode-scanner-error" role="alert">{error}</p>
+          : <p className="field-hint" role="status">{scanning ? "Point the camera at the barcode on the device or box." : "Starting camera…"}</p>}
+      </div>
+      <div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button></div>
+    </section>
+  </div>;
+}
+
 function paymentTotal(payments: Payment[]): number {
   return payments.reduce((sum, payment) => sum + payment.amount, 0);
 }
@@ -130,7 +299,7 @@ function servicePaid(service: ServiceJob): number {
 function serviceDue(service: ServiceJob): number {
   // No service charge is due when the device is returned unrepaired.
   if (service.returnOutcome === "Not repaired") return 0;
-  return Math.max(0, service.serviceAmount - service.discount - servicePaid(service));
+  return Math.max(0, service.serviceAmount - service.discount + (service.tax || 0) - servicePaid(service));
 }
 
 function statusOf(total: number, paid: number): PaymentStatus {
@@ -345,15 +514,23 @@ export default function Workspace() {
     setData(nextData);
   }, []);
 
-  const saveCustomer = useCallback(async (name: string, phone: string, email = ""): Promise<Customer> => {
+  const saveCustomer = useCallback(async (name: string, phone: string, email = "", address = ""): Promise<Customer> => {
     const customer = makeCustomer(name.trim(), phone.trim(), data.customers);
-    const complete = { ...customer, email: email || customer.email || "" };
-    if (!data.customers.some((item) => item.id === customer.id)) {
+    const complete = { ...customer, email: email || customer.email || "", address: address.trim() || customer.address || "" };
+    if (!data.customers.some((item) => item.id === customer.id)
+      || (address.trim() && address.trim() !== customer.address)
+      || (email && email !== customer.email)) {
       if (firebaseConfigured && user) {
         const transactionEditor = user.role === "employee"
           && (user.permissions.sales === "edit" || user.permissions.services === "edit");
         if (user.role !== "employee" || user.permissions.customers === "edit" || !transactionEditor) {
           await writeRecord(user.shopId, "customers", complete.id, complete);
+          setData((current) => ({
+            ...current,
+            customers: current.customers.some((item) => item.id === complete.id)
+              ? current.customers.map((item) => item.id === complete.id ? complete : item)
+              : [complete, ...current.customers],
+          }));
         }
       }
       else await persist(updateLocalRecord(data, "customers", complete.id, complete));
@@ -365,20 +542,21 @@ export default function Workspace() {
     if (data.sales.some((sale) => sale.invoiceNumber === draft.invoiceNumber.trim())) {
       throw new Error("That invoice number is already in use.");
     }
-    const customer = await saveCustomer(draft.customerName, draft.contactNumber);
+    const customer = await saveCustomer(draft.customerName, draft.contactNumber, "", draft.customerAddress);
+    const savedDraft = { ...draft, customerAddress: draft.customerAddress?.trim() || customer.address || "" };
     if (firebaseConfigured && user) {
       const created = await createNumberedRecord(user.shopId, "sales", data.settings.salesPrefix || "SAL", {
-        ...draft, customerId: customer.id,
+        ...savedDraft, customerId: customer.id,
       });
-      const sale = { ...draft, id: created.id, invoiceNumber: created.number, customerId: customer.id };
+      const sale = { ...savedDraft, id: created.id, invoiceNumber: created.number, customerId: customer.id };
       pendingCloudRecords.current.sales.set(sale.id, sale);
       setData((current) => ({ ...current, sales: [sale, ...current.sales.filter((item) => item.id !== sale.id)] }));
       return sale;
     }
     const id = newId();
     const invoiceNumber = draft.invoiceNumber.trim();
-    const sale: Sale = { ...draft, id, invoiceNumber, customerId: customer.id };
-    const customers = data.customers.some((item) => item.id === customer.id) ? data.customers : [customer, ...data.customers];
+    const sale: Sale = { ...savedDraft, id, invoiceNumber, customerId: customer.id };
+    const customers = [customer, ...data.customers.filter((item) => item.id !== customer.id)];
     await persist({ ...data, customers, sales: [sale, ...data.sales] });
     return sale;
   }, [data, persist, saveCustomer, user]);
@@ -387,20 +565,21 @@ export default function Workspace() {
     if (draft.vendorId && !data.vendors.some((vendor) => vendor.id === draft.vendorId)) {
       throw new Error("The selected service vendor could not be found.");
     }
-    const customer = await saveCustomer(draft.customerName, draft.contactNumber);
+    const customer = await saveCustomer(draft.customerName, draft.contactNumber, "", draft.customerAddress);
+    const savedDraft = { ...draft, customerAddress: draft.customerAddress?.trim() || customer.address || "" };
     if (firebaseConfigured && user) {
       const created = await createNumberedRecord(user.shopId, "services", data.settings.servicePrefix || "SRV", {
-        ...draft, customerId: customer.id,
+        ...savedDraft, customerId: customer.id,
       });
-      const service = { ...draft, id: created.id, serviceNumber: created.number, customerId: customer.id };
+      const service = { ...savedDraft, id: created.id, serviceNumber: created.number, customerId: customer.id };
       pendingCloudRecords.current.services.set(service.id, service);
       setData((current) => ({ ...current, services: [service, ...current.services.filter((item) => item.id !== service.id)] }));
       return service;
     }
     const id = newId();
     const serviceNumber = draft.serviceNumber?.trim() || nextInvoiceNumber("services", data.settings.servicePrefix || "SRV", data.services);
-    const service: ServiceJob = { ...draft, id, serviceNumber, customerId: customer.id };
-    const customers = data.customers.some((item) => item.id === customer.id) ? data.customers : [customer, ...data.customers];
+    const service: ServiceJob = { ...savedDraft, id, serviceNumber, customerId: customer.id };
+    const customers = [customer, ...data.customers.filter((item) => item.id !== customer.id)];
     await persist({ ...data, customers, services: [service, ...data.services] });
     return service;
   }, [data, persist, saveCustomer, user]);
@@ -563,17 +742,148 @@ export default function Workspace() {
     }
   }, [data, persist, user]);
 
+  const confirmDeleteSale = (sale: Sale) => {
+    setModal(
+      <ConfirmDeleteModal
+        title="Delete sales invoice?"
+        itemName={sale.invoiceNumber}
+        description={`Are you sure you want to delete invoice ${sale.invoiceNumber} for customer "${sale.customerName}"? Any recorded payments for this invoice will also be deleted. This action cannot be undone.`}
+        confirmLabel="Delete invoice"
+        onCancel={() => setModal(null)}
+        onConfirm={async () => {
+          if (firebaseConfigured && user) {
+            await deleteRecord(user.shopId, "sales", sale.id);
+          } else {
+            await persist(deleteLocalRecord(data, "sales", sale.id));
+          }
+          setData((current) => ({
+            ...current,
+            sales: current.sales.filter((item) => item.id !== sale.id),
+          }));
+          setModal(null);
+          notify(`Sales invoice ${sale.invoiceNumber} deleted.`);
+          if (route === "sales" && routeId) {
+            navigate("/sales");
+          }
+        }}
+      />
+    );
+  };
+
+  const openEditSale = (sale: Sale) => {
+    setModal(
+      <EditSaleModal
+        sale={sale}
+        onClose={() => setModal(null)}
+        onSave={async (updated) => {
+          if (firebaseConfigured && user) {
+            await editSaleRecord(user.shopId, sale.id, updated);
+          } else {
+            await persist(updateLocalRecord(data, "sales", sale.id, { ...sale, ...updated }));
+          }
+          setData((current) => ({
+            ...current,
+            sales: current.sales.map((item) => item.id === sale.id ? { ...item, ...updated } : item),
+          }));
+          setModal(null);
+          notify(`Sales invoice ${sale.invoiceNumber} updated.`);
+        }}
+      />
+    );
+  };
+
+  const confirmDeleteService = (service: ServiceJob) => {
+    setModal(
+      <ConfirmDeleteModal
+        title="Delete service job?"
+        itemName={service.serviceNumber}
+        description={`Are you sure you want to delete service job ${service.serviceNumber} for customer "${service.customerName}"? Any recorded payments and status records for this device will be deleted. This action cannot be undone.`}
+        confirmLabel="Delete service"
+        onCancel={() => setModal(null)}
+        onConfirm={async () => {
+          if (firebaseConfigured && user) {
+            await deleteRecord(user.shopId, "services", service.id);
+          } else {
+            await persist(deleteLocalRecord(data, "services", service.id));
+          }
+          setData((current) => ({
+            ...current,
+            services: current.services.filter((item) => item.id !== service.id),
+          }));
+          setModal(null);
+          notify(`Service job ${service.serviceNumber} deleted.`);
+          if (route === "services" && routeId) {
+            navigate("/services");
+          }
+        }}
+      />
+    );
+  };
+
+  const openEditService = (service: ServiceJob) => {
+    setModal(
+      <EditServiceModal
+        service={service}
+        vendors={data.vendors}
+        onClose={() => setModal(null)}
+        onSave={async (updated) => {
+          if (firebaseConfigured && user) {
+            await editServiceRecord(user.shopId, service.id, updated);
+          } else {
+            await persist(updateLocalRecord(data, "services", service.id, { ...service, ...updated }));
+          }
+          setData((current) => ({
+            ...current,
+            services: current.services.map((item) => item.id === service.id ? { ...item, ...updated } : item),
+          }));
+          setModal(null);
+          notify(`Service job ${service.serviceNumber} updated.`);
+        }}
+      />
+    );
+  };
+
+  const confirmDeleteVendorService = (service: VendorService) => {
+    setModal(
+      <ConfirmDeleteModal
+        title="Delete vendor service?"
+        itemName={service.serviceNumber}
+        description={`Are you sure you want to delete vendor service ${service.serviceNumber} for customer "${service.customerName}"? This action cannot be undone.`}
+        confirmLabel="Delete vendor service"
+        onCancel={() => setModal(null)}
+        onConfirm={async () => {
+          if (firebaseConfigured && user) {
+            await deleteVendorServiceCloud(service.id);
+          } else {
+            await persist(deleteLocalVendorService(data, service.id));
+          }
+          setData((current) => ({
+            ...current,
+            vendorServices: current.vendorServices.filter((item) => item.id !== service.id),
+          }));
+          setModal(null);
+          notify(`Vendor service ${service.serviceNumber} deleted.`);
+        }}
+      />
+    );
+  };
+
   const viewVendorServiceDetail = (service: VendorService) => {
     const vendor = data.vendors.find((item) => item.id === service.vendorId);
     if (!vendor) {
       notify("The service vendor could not be found. Reload and try again.", "error");
       return;
     }
+    const normalizedCustomerNumber = normalizePhoneNumber(service.customerNumber);
+    const customer = normalizedCustomerNumber.length >= 7
+      ? data.customers.find((item) => normalizePhoneNumber(item.phone) === normalizedCustomerNumber)
+      : undefined;
     setModal(<VendorServiceDetailModal
-      service={service}
+      service={{ ...service, customerAddress: service.customerAddress || customer?.address || "" }}
       vendor={vendor}
       canEdit={canEditModule("vendors")}
       onClose={() => setModal(null)}
+      onDelete={confirmDeleteVendorService}
       onSave={async (updated) => {
         await updateVendorServiceRecord(service, updated);
         notify("Vendor service details updated.");
@@ -876,11 +1186,11 @@ export default function Workspace() {
   const addCustomerDialog = () => {
     setModal(<CustomerModal
       onClose={() => setModal(null)}
-      onSave={async (name, phone, email) => {
+      onSave={async (name, phone, email, address) => {
         try {
-          const parsed = customerSchema.safeParse({ name, phone, email });
+          const parsed = customerSchema.safeParse({ name, phone, email, address });
           if (!parsed.success) throw new Error(parsed.error.issues[0]?.message);
-          const customer = await saveCustomer(name, phone, email);
+          const customer = await saveCustomer(name, phone, email, address);
           setModal(null);
           notify(data.customers.some((item) => item.id === customer.id) ? "Customer already exists." : "Customer added.");
         } catch (reason) {
@@ -895,14 +1205,14 @@ export default function Workspace() {
       title="Edit customer"
       initial={customer}
       onClose={() => setModal(null)}
-      onSave={async (name, phone, email) => {
+      onSave={async (name, phone, email, address) => {
         try {
-          const parsed = customerSchema.safeParse({ name, phone, email });
+          const parsed = customerSchema.safeParse({ name, phone, email, address });
           if (!parsed.success) throw new Error(parsed.error.issues[0]?.message);
           const duplicate = data.customers.find((item) =>
             item.id !== customer.id && normalizePhoneNumber(item.phone) === normalizePhoneNumber(phone));
           if (duplicate) throw new Error(`This number already belongs to ${duplicate.name}.`);
-          const updated = { ...customer, name: name.trim(), phone: phone.trim(), email: email.trim() };
+          const updated = { ...customer, name: name.trim(), phone: phone.trim(), email: email.trim(), address: address.trim() };
           if (firebaseConfigured && user) await writeRecord(user.shopId, "customers", updated.id, updated);
           else await persist(updateLocalRecord(data, "customers", updated.id, updated));
           setModal(null);
@@ -936,6 +1246,15 @@ export default function Workspace() {
     />);
   };
 
+  const selectedSale = data.sales.find((item) => item.id === routeId || item.invoiceNumber === routeId);
+  const selectedSaleWithAddress = selectedSale
+    ? { ...selectedSale, customerAddress: selectedSale.customerAddress || data.customers.find((customer) => customer.id === selectedSale.customerId)?.address || "" }
+    : undefined;
+  const selectedService = data.services.find((item) => item.id === routeId || item.serviceNumber === routeId);
+  const selectedServiceWithAddress = selectedService
+    ? { ...selectedService, customerAddress: selectedService.customerAddress || data.customers.find((customer) => customer.id === selectedService.customerId)?.address || "" }
+    : undefined;
+
   const view = route === "sales" && subroute === "create"
     ? <SaleForm
         data={data}
@@ -954,15 +1273,18 @@ export default function Workspace() {
       />
     : route === "sales" && routeId
     ? <SaleDetail
-        sale={data.sales.find((item) => item.id === routeId || item.invoiceNumber === routeId)}
+        sale={selectedSaleWithAddress}
         settings={data.settings}
         onBack={() => navigate("/sales")}
         onPayment={(id) => openPayment("sale", id)}
+        onEdit={openEditSale}
+        onDelete={confirmDeleteSale}
         canEdit={canEditModule("sales")}
       />
     : route === "sales"
     ? <SalesPage sales={data.sales} search={globalSearch} onSearch={setGlobalSearch}
         onCreate={() => navigate("/sales/create")} onView={(id) => navigate(`/sales/${id}`)}
+        onEdit={openEditSale} onDelete={confirmDeleteSale}
         onPayment={(id) => openPayment("sale", id)} settings={data.settings} canEdit={canEditModule("sales")} />
     : route === "services" && subroute === "create"
     ? <ServiceForm
@@ -998,15 +1320,17 @@ export default function Workspace() {
         canViewAllServices={canViewModule("services") || canViewModule("reports")}
       />
     : route === "services" && routeId
-    ? <ServiceDetail service={data.services.find((item) => item.id === routeId || item.serviceNumber === routeId)}
-        vendor={data.vendors.find((item) => item.id === data.services.find((service) => service.id === routeId || service.serviceNumber === routeId)?.vendorId)}
+    ? <ServiceDetail service={selectedServiceWithAddress}
+        vendor={data.vendors.find((item) => item.id === selectedService?.vendorId)}
         onBack={() => navigate(canViewModule("services") || canViewModule("reports") ? "/services" : "/services/ready")}
         onPayment={(id) => openPayment("service", id)} settings={data.settings}
+        onEdit={openEditService} onDelete={confirmDeleteService}
         onUpdate={(service) => setServiceStatus(service, service.status)}
         onNotRepaired={(service) => showNotRepairedModal(service)} canEdit={canEditModule("services")} />
     : route === "services"
     ? <ServicesPage services={data.services} search={globalSearch} onSearch={setGlobalSearch}
         onCreate={() => navigate("/services/create")} onView={(id) => navigate(`/services/${id}`)}
+        onEdit={openEditService} onDelete={confirmDeleteService}
         onPayment={(id) => openPayment("service", id)} onUpdate={(service) => setServiceStatus(service, service.status)}
         onVendorChange={assignServiceVendor} canEdit={canEditModule("services")} vendors={data.vendors} settings={data.settings} />
     : route === "vendors"
@@ -1019,6 +1343,7 @@ export default function Workspace() {
         onSelect={(id) => navigate(id ? `/vendors/${id}` : "/vendors")}
         onCreateService={addVendorServiceDialog}
         onEditService={viewVendorServiceDetail}
+        onDeleteService={confirmDeleteVendorService}
         onMarkNotRepaired={confirmVendorServiceNotRepaired}
         onStatusChange={changeVendorServiceStatus}
         onDeleteVendor={deleteServiceVendor}
@@ -1447,9 +1772,9 @@ function chartForCustomRange(data: WorkspaceData, from: string, to: string) {
   }));
 }
 
-function SalesPage({ sales, search, onSearch, onCreate, onView, onPayment, settings, canEdit }: {
+function SalesPage({ sales, search, onSearch, onCreate, onView, onEdit, onDelete, onPayment, settings, canEdit }: {
   sales: Sale[]; search: string; onSearch: (value: string) => void; onCreate: () => void;
-  onView: (id: string) => void; onPayment: (id: string) => void; settings: ShopSettings; canEdit: boolean;
+  onView: (id: string) => void; onEdit?: (sale: Sale) => void; onDelete?: (sale: Sale) => void; onPayment: (id: string) => void; settings: ShopSettings; canEdit: boolean;
 }) {
   const [paymentFilter, setPaymentFilter] = useState("All statuses");
   const [from, setFrom] = useState("");
@@ -1549,15 +1874,15 @@ function SalesPage({ sales, search, onSearch, onCreate, onView, onPayment, setti
     <PageHeader eyebrow="RETAIL" title="Sales" description="Create invoices, track payments, and keep every sale in one place."><Button variant="secondary" onClick={exportSalesPdf}><Download size={15} /> Export PDF</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> Create sales bill</Button>}</PageHeader>
     <div className="page-stat-row"><span className="stat-pill"><FileText size={15} /><strong>{sales.length}</strong> invoices</span><span className="stat-pill"><ArrowUpRight size={15} /><strong>{money(sales.reduce((sum, sale) => sum + sale.finalAmount, 0))}</strong> billed</span><span className="stat-pill"><Clock3 size={15} /><strong>{money(sales.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0))}</strong> due</span></div>
     <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search invoice, customer or phone…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All statuses</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option></select><ChevronDown size={14} /></label><div className="date-range compact-date-range"><label>From<input aria-label="Sales from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /></label><label>To<input aria-label="Sales to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /></label></div><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
-      {filtered.length ? <SalesTable sales={filtered.slice((page - 1) * pageSize, page * pageSize)} onView={onView} onPayment={canEdit ? onPayment : undefined} settings={settings} /> :
+      {filtered.length ? <SalesTable sales={filtered.slice((page - 1) * pageSize, page * pageSize)} onView={onView} onEdit={canEdit ? onEdit : undefined} onDelete={canEdit ? onDelete : undefined} onPayment={canEdit ? onPayment : undefined} settings={settings} /> :
         <EmptyState icon={CreditCard} title={search || paymentFilter !== "All statuses" ? "No matching invoices" : "Ready for your first sale?"} detail={sales.length ? "Try a different search or payment status." : "Create a sales bill and your invoices will appear here."} action={!sales.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> Create sales bill</Button> : undefined} />}
       {filtered.length > 0 && <Pagination page={page} pages={pages} total={filtered.length} pageSize={pageSize} onPage={setPage} />}
     </div>
   </>;
 }
 
-function SalesTable({ sales, compact = false, canOpen = true, onView, onPayment, settings }: {
-  sales: Sale[]; compact?: boolean; canOpen?: boolean; onView?: (id: string) => void; onPayment?: (id: string) => void; settings?: ShopSettings;
+function SalesTable({ sales, compact = false, canOpen = true, onView, onEdit, onDelete, onPayment, settings }: {
+  sales: Sale[]; compact?: boolean; canOpen?: boolean; onView?: (id: string) => void; onEdit?: (sale: Sale) => void; onDelete?: (sale: Sale) => void; onPayment?: (id: string) => void; settings?: ShopSettings;
 }) {
   const router = useRouter();
   const viewSale = (id: string) => onView ? onView(id) : clientNavigate(`/sales/${id}`);
@@ -1565,7 +1890,7 @@ function SalesTable({ sales, compact = false, canOpen = true, onView, onPayment,
     {sales.map((sale) => {
       const paid = paymentTotal(sale.payments);
       const due = Math.max(0, sale.finalAmount - paid);
-      return <tr key={sale.id}><td>{canOpen ? <button className="table-primary-link" onClick={() => viewSale(sale.id)}>{sale.invoiceNumber}</button> : <span>{sale.invoiceNumber}</span>}</td><td><span className="customer-cell"><span className="mini-avatar">{sale.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{sale.customerName}</strong><small>{sale.contactNumber}</small></span></span></td>{!compact && <td><span className="muted-cell">{sale.products.length} item{sale.products.length === 1 ? "" : "s"}</span></td>}<td><span className="muted-cell">{dateLabel(sale.invoiceDate)}</span></td><td><strong className="amount-cell">{money(sale.finalAmount)}</strong></td>{!compact && <td><span className="muted-cell">{money(paid)}{due > 0 && <small className="due-text">{money(due)} due</small>}</span></td>}<td><StatusBadge status={statusOf(sale.finalAmount, paid)} /></td><td>{canOpen && <button className="row-action" aria-label="View invoice" onClick={() => viewSale(sale.id)}><ArrowRight size={15} /></button>}{onPayment && due > 0 && <button className="row-action" aria-label="Record payment" onClick={() => onPayment(sale.id)}><Plus size={15} /></button>}{settings && <button className="row-action" aria-label="Download invoice" onClick={() => downloadInvoice(sale, settings)}><Download size={15} /></button>}</td></tr>;
+      return <tr key={sale.id}><td>{canOpen ? <button className="table-primary-link" onClick={() => viewSale(sale.id)}>{sale.invoiceNumber}</button> : <span>{sale.invoiceNumber}</span>}</td><td><span className="customer-cell"><span className="mini-avatar">{sale.customerName[0]?.toUpperCase() || "?"}</span><span><strong>{sale.customerName}</strong><small>{sale.contactNumber}</small></span></span></td>{!compact && <td><span className="muted-cell">{sale.products.length} item{sale.products.length === 1 ? "" : "s"}</span></td>}<td><span className="muted-cell">{dateLabel(sale.invoiceDate)}</span></td><td><strong className="amount-cell">{money(sale.finalAmount)}</strong></td>{!compact && <td><span className="muted-cell">{money(paid)}{due > 0 && <small className="due-text">{money(due)} due</small>}</span></td>}<td><StatusBadge status={statusOf(sale.finalAmount, paid)} /></td><td>{canOpen && <button className="row-action" aria-label="View invoice" title="View invoice" onClick={() => viewSale(sale.id)}><ArrowRight size={15} /></button>}{onEdit && <button className="row-action" aria-label="Edit invoice" title="Edit invoice" onClick={() => onEdit(sale)}><Pencil size={15} /></button>}{onDelete && <button className="row-action danger-action" aria-label="Delete invoice" title="Delete invoice" onClick={() => onDelete(sale)}><Trash2 size={15} /></button>}{onPayment && due > 0 && <button className="row-action" aria-label="Record payment" title="Record payment" onClick={() => onPayment(sale.id)}><Plus size={15} /></button>}{settings && <button className="row-action" aria-label="Download invoice" title="Download invoice" onClick={() => downloadInvoice(sale, settings)}><Download size={15} /></button>}</td></tr>;
     })}
   </tbody></table></div>;
 }
@@ -1574,6 +1899,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
   data: WorkspaceData; busy: boolean; onSubmit: (draft: Omit<Sale, "id">) => Promise<Sale | undefined>; onCancel: () => void;
 }) {
   const [products, setProducts] = useState<ProductLine[]>([{ id: newId(), category: "Electronics", brand: "", model: "", productName: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
+  const [enableTax, setEnableTax] = useState(data.settings.enableTax !== false);
   const [tax, setTax] = useState(0);
   const [paid, setPaid] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -1581,23 +1907,27 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
   const generatedInvoiceNumber = nextInvoiceNumber("sales", data.settings.salesPrefix || "SAL", data.sales);
   const { register, handleSubmit, control, setValue, formState: { errors } } = useForm({
     resolver: zodResolver(saleSchema.omit({ products: true })),
-    defaultValues: { customerName: "", contactNumber: "", invoiceDate: dateInputValue(), invoiceNumber: generatedInvoiceNumber, discount: 0, tax: 0, amountPaid: 0 },
+    defaultValues: { customerName: "", contactNumber: "", customerAddress: "", invoiceDate: dateInputValue(), invoiceNumber: generatedInvoiceNumber, discount: 0, tax: 0, amountPaid: 0 },
   });
   const name = useWatch({ control, name: "customerName" });
   const phone = useWatch({ control, name: "contactNumber" });
+  const customerAddress = useWatch({ control, name: "customerAddress" });
   const invoiceDate = useWatch({ control, name: "invoiceDate" });
   const invoiceNumber = useWatch({ control, name: "invoiceNumber" });
   const total = products.reduce((sum, product) => sum + Math.max(0, product.quantity * product.rate - product.discount), 0);
-  const final = Math.max(0, total + tax);
+  const final = Math.max(0, total + (enableTax ? tax : 0));
   const normalizedPhone = normalizePhoneNumber(phone ?? "");
   const matchingCustomer = data.customers.find((customer) =>
     normalizedPhone.length >= 7 && normalizePhoneNumber(customer.phone) === normalizedPhone);
   useEffect(() => {
-    if (matchingCustomer) setValue("customerName", matchingCustomer.name);
+    if (matchingCustomer) {
+      setValue("customerName", matchingCustomer.name);
+      setValue("customerAddress", matchingCustomer.address || "");
+    }
   }, [matchingCustomer, setValue]);
   const addProduct = () => setProducts((current) => [...current, { id: newId(), category: "Electronics", brand: "", model: "", productName: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
   const updateProduct = (id: string, key: keyof ProductLine, value: string | number) => setProducts((current) => current.map((item) => item.id === id ? { ...item, [key]: value } : item));
-  const saveDraft = async (form: { customerName: string; contactNumber: string; invoiceDate: string; invoiceNumber: string }, printAfterSave = false) => {
+  const saveDraft = async (form: { customerName: string; contactNumber: string; customerAddress: string; invoiceDate: string; invoiceNumber: string }, printAfterSave = false) => {
     setFieldErrors({});
     for (const [index, p] of products.entries()) {
       const cat = p.category ?? "Electronics";
@@ -1617,7 +1947,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
         }
       }
     }
-    const parsed = saleSchema.safeParse({ ...form, products, discount: 0, tax, amountPaid: paid });
+    const parsed = saleSchema.safeParse({ ...form, products, discount: 0, tax: enableTax ? tax : 0, amountPaid: paid });
     if (!parsed.success) {
       const nextErrors: Record<string, string> = {};
       for (const issue of parsed.error.issues) nextErrors[String(issue.path[0])] = issue.message;
@@ -1645,6 +1975,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
       customerId: customer?.id ?? "",
       customerName: customer?.name ?? form.customerName.trim(),
       contactNumber: form.contactNumber.trim(),
+      customerAddress: form.customerAddress.trim(),
       invoiceDate: businessDateTime(form.invoiceDate),
       products: products.map((item) => ({
         ...item,
@@ -1655,7 +1986,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
       })),
       subtotal: total,
       discount: 0,
-      tax,
+      tax: enableTax ? tax : 0,
       finalAmount: final,
       payments,
       createdAt: new Date().toISOString(),
@@ -1666,8 +1997,8 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
   const submitAndPrint = handleSubmit((form) => saveDraft(form, true));
   const draftSale: Sale = {
     id: "", invoiceNumber: invoiceNumber || generatedInvoiceNumber,
-    customerId: "", customerName: name || "Customer name", contactNumber: phone || "",
-    invoiceDate, products, subtotal: total, discount: 0, tax, finalAmount: final,
+    customerId: "", customerName: name || "Customer name", contactNumber: phone || "", customerAddress: customerAddress || "",
+    invoiceDate, products, subtotal: total, discount: 0, tax: enableTax ? tax : 0, finalAmount: final,
     payments: paid ? [{ id: "preview", amount: paid, date: new Date().toISOString() }] : [], createdAt: new Date().toISOString(),
   };
   return <>
@@ -1675,16 +2006,34 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
     <form className="billing-layout" onSubmit={submit} noValidate>
       <div className="billing-main">
         <section className="panel form-panel"><div className="form-section-head"><span className="step-number">01</span><div><h2>Customer details</h2><p>Who is this invoice for?</p></div></div>
-          <div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} />{matchingCustomer && <span className="field-hint"><CheckCircle2 size={13} /> Existing customer: {matchingCustomer.name}</span>}</FormField><FormField label="Invoice date"><input className="input" type="date" {...register("invoiceDate")} /></FormField><FormField label="Invoice number" error={errors.invoiceNumber?.message ?? fieldErrors.invoiceNumber}><input className="input" maxLength={120} {...register("invoiceNumber")} /><span className="field-hint">Auto-generated; edit if needed.</span></FormField></div>
+          <div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} />{matchingCustomer && <span className="field-hint"><CheckCircle2 size={13} /> Existing customer: {matchingCustomer.name}</span>}</FormField><FormField label="Customer address" error={errors.customerAddress?.message}><textarea className="input textarea" maxLength={500} placeholder="Street, area, city" {...register("customerAddress")} /></FormField><FormField label="Invoice date"><input className="input" type="date" {...register("invoiceDate")} /></FormField><FormField label="Invoice number" error={errors.invoiceNumber?.message ?? fieldErrors.invoiceNumber}><input className="input" maxLength={120} {...register("invoiceNumber")} /><span className="field-hint">Auto-generated; edit if needed.</span></FormField></div>
         </section>
         <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Products</h2><p>Add one or more devices to this sale.</p></div><Button variant="secondary" onClick={addProduct}><Plus size={15} /> Add product</Button></div>
-          <div className="product-list">{products.map((product, index) => <div className="product-row" key={product.id}><div className="product-row-title"><span>Product {String(index + 1).padStart(2, "0")}</span>{products.length > 1 && <button className="remove-link" type="button" onClick={() => setProducts((items) => items.filter((item) => item.id !== product.id))}><X size={14} /> Remove</button>}</div><div className="form-grid product-fields"><FormField label="Category"><div className="select-wrap category1-select-wrap"><select className="input" value={product.category ?? "Electronics"} onChange={(event) => { const cat = event.target.value as ProductCategory; setProducts((items) => items.map((item) => item.id === product.id ? { ...item, category: cat, brand: "", model: "", productName: "" } : item)); }}><option value="Electronics">Electronics</option><option value="Accessories">Accessories</option></select><ChevronDown size={14} /></div></FormField>{(product.category ?? "Electronics") === "Electronics" ? <><FormField label="Brand"><input className="input" placeholder="Apple" value={product.brand} onChange={(event) => updateProduct(product.id, "brand", event.target.value)} /></FormField><FormField label="Model"><input className="input" placeholder="iPhone 15" value={product.model} onChange={(event) => updateProduct(product.id, "model", event.target.value)} /></FormField></> : <div className="product-span-2"><FormField label="Product name"><input className="input" placeholder="e.g. Tempered glass, Charger…" value={product.productName ?? ""} onChange={(event) => updateProduct(product.id, "productName", event.target.value)} /></FormField></div>}<FormField label="IMEI / Serial"><input className="input" placeholder="Optional" value={product.imei} onChange={(event) => updateProduct(product.id, "imei", event.target.value)} /></FormField><FormField label="Qty"><input className="input" type="number" min="1" value={product.quantity} onChange={(event) => updateProduct(product.id, "quantity", Number(event.target.value))} /></FormField><FormField label="Rate (₹)"><input className="input" type="number" min="0" value={product.rate || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "rate", Number(event.target.value))} /></FormField><FormField label="Discount (₹)"><input className="input" type="number" min="0" value={product.discount || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "discount", Number(event.target.value))} /></FormField><div className="line-total"><span>Line total</span><strong>{money(Math.max(0, product.quantity * product.rate - product.discount))}</strong></div></div></div>)}</div>
+          <div className="product-list">{products.map((product, index) => <div className="product-row" key={product.id}><div className="product-row-title"><span>Product {String(index + 1).padStart(2, "0")}</span>{products.length > 1 && <button className="remove-link" type="button" onClick={() => setProducts((items) => items.filter((item) => item.id !== product.id))}><X size={14} /> Remove</button>}</div><div className="form-grid product-fields"><FormField label="Category"><div className="select-wrap category1-select-wrap"><select className="input" value={product.category ?? "Electronics"} onChange={(event) => { const cat = event.target.value as ProductCategory; setProducts((items) => items.map((item) => item.id === product.id ? { ...item, category: cat, brand: "", model: "", productName: "" } : item)); }}><option value="Electronics">Electronics</option><option value="Accessories">Accessories</option></select><ChevronDown size={14} /></div></FormField>{(product.category ?? "Electronics") === "Electronics" ? <><FormField label="Brand"><input className="input" placeholder="Apple" value={product.brand} onChange={(event) => updateProduct(product.id, "brand", event.target.value)} /></FormField><FormField label="Model"><input className="input" placeholder="iPhone 15" value={product.model} onChange={(event) => updateProduct(product.id, "model", event.target.value)} /></FormField></> : <div className="product-span-2"><FormField label="Product name"><input className="input" placeholder="e.g. Tempered glass, Charger…" value={product.productName ?? ""} onChange={(event) => updateProduct(product.id, "productName", event.target.value)} /></FormField></div>}<FormField label="IMEI / Serial"><div className="imei-input-wrap"><input className="input" maxLength={20} placeholder="Optional" value={product.imei} onChange={(event) => updateProduct(product.id, "imei", event.target.value)} /><ScanBarcodeButton onScan={(value) => updateProduct(product.id, "imei", value)} /></div></FormField><FormField label="Qty"><input className="input" type="number" min="1" value={product.quantity} onChange={(event) => updateProduct(product.id, "quantity", Number(event.target.value))} /></FormField><FormField label="Rate (₹)"><input className="input" type="number" min="0" value={product.rate || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "rate", Number(event.target.value))} /></FormField><FormField label="Discount (₹)"><input className="input" type="number" min="0" value={product.discount || ""} placeholder="0" onChange={(event) => updateProduct(product.id, "discount", Number(event.target.value))} /></FormField><div className="line-total"><span>Line total</span><strong>{money(Math.max(0, product.quantity * product.rate - product.discount))}</strong></div></div></div>)}</div>
           {fieldErrors.products && <span className="field-error">{fieldErrors.products}</span>}
         </section>
-        <section className="panel form-panel"><div className="form-section-head"><span className="step-number">03</span><div><h2>Payment details</h2><p>Record the amount received today.</p></div></div><div className="form-grid two-col"><FormField label="Amount paid (₹)" error={fieldErrors.amountPaid}><input className="input" type="number" min="0" value={paid || ""} placeholder="0" onChange={(event) => setPaid(Number(event.target.value))} /></FormField><FormField label="Tax (₹), optional"><input className="input" type="number" min="0" value={tax || ""} placeholder="0" onChange={(event) => setTax(Number(event.target.value))} /></FormField></div></section>
+        <section className="panel form-panel">
+          <div className="form-section-head">
+            <span className="step-number">03</span>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+              <div><h2>Payment details</h2><p>Record the amount received today.</p></div>
+              <label className="checkbox-wrap" style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontWeight: 500, fontSize: 13 }}>
+                <input type="checkbox" checked={enableTax} onChange={(event) => {
+                  setEnableTax(event.target.checked);
+                  if (!event.target.checked) setTax(0);
+                }} />
+                <span>Enable tax</span>
+              </label>
+            </div>
+          </div>
+          <div className="form-grid two-col">
+            <FormField label="Amount paid (₹)" error={fieldErrors.amountPaid}><input className="input" type="number" min="0" value={paid || ""} placeholder="0" onChange={(event) => setPaid(Number(event.target.value))} /></FormField>
+            {enableTax && <FormField label="Tax (₹)"><input className="input" type="number" min="0" value={tax || ""} placeholder="0" onChange={(event) => setTax(Number(event.target.value))} /></FormField>}
+          </div>
+        </section>
         <div className="form-footer"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="secondary" onClick={() => setPreview(true)}><FileText size={15} /> Preview invoice</Button><Button variant="secondary" onClick={() => void submitAndPrint()} disabled={busy}><Printer size={15} /> Save & print</Button><Button type="submit" disabled={busy}>{busy ? "Saving…" : <><Check size={16} /> Save sales bill</>}</Button></div>
       </div>
-      <aside className="billing-side"><div className="panel total-card"><div className="total-card-title"><span className="total-icon"><CreditCard size={17} /></span><span><strong>Invoice summary</strong><small>Totals update as you go</small></span></div><div className="total-lines"><span>Subtotal <strong>{money(total)}</strong></span><span>Discount <strong>− {money(products.reduce((sum, item) => sum + item.discount, 0))}</strong></span><span>Tax <strong>{money(tax)}</strong></span><div className="total-final"><span>Amount due</span><strong>{money(final)}</strong></div><span>Paid today <strong>{money(paid)}</strong></span></div><div className={`balance-box ${final - paid > 0 ? "" : "settled"}`}><span>{final - paid > 0 ? "Balance due" : "Fully paid"}</span>{final - paid > 0 && <strong>{money(final - paid)}</strong>}</div></div><div className="billing-tip"><ShieldCheck size={16} /><span>IMEI and product details stay with this invoice for easy reference.</span></div></aside>
+      <aside className="billing-side"><div className="panel total-card"><div className="total-card-title"><span className="total-icon"><CreditCard size={17} /></span><span><strong>Invoice summary</strong><small>Totals update as you go</small></span></div><div className="total-lines"><span>Subtotal <strong>{money(total)}</strong></span><span>Discount <strong>− {money(products.reduce((sum, item) => sum + item.discount, 0))}</strong></span>{enableTax && tax > 0 && <span>Tax <strong>{money(tax)}</strong></span>}<div className="total-final"><span>Amount due</span><strong>{money(final)}</strong></div><span>Paid today <strong>{money(paid)}</strong></span></div><div className={`balance-box ${final - paid > 0 ? "" : "settled"}`}><span>{final - paid > 0 ? "Balance due" : "Fully paid"}</span>{final - paid > 0 && <strong>{money(final - paid)}</strong>}</div></div><div className="billing-tip"><ShieldCheck size={16} /><span>IMEI and product details stay with this invoice for easy reference.</span></div></aside>
     </form>
     {preview && <InvoiceModal sale={draftSale} settings={data.settings} onClose={() => setPreview(false)} />}
   </>;
@@ -1729,16 +2078,16 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
   const [serviceBrand, setServiceBrand] = useState("");
   const [serviceModel, setServiceModel] = useState("");
   const [serviceProductName, setServiceProductName] = useState("");
-  const { register, handleSubmit, formState: { errors } } = useForm({
+  const { register, handleSubmit, setValue, formState: { errors } } = useForm({
     resolver: zodResolver(serviceFormSchema),
-    defaultValues: { customerName: "", contactNumber: "", inDate: dateInputValue(), brand: "", mobileModel: "", imei: "", reportedFault: "", technicianNotes: "", remarks: "", serviceAmount: 0, discount: 0 },
+    defaultValues: { customerName: "", contactNumber: "", customerAddress: "", inDate: dateInputValue(), brand: "", mobileModel: "", imei: "", reportedFault: "", technicianNotes: "", remarks: "", serviceAmount: 0, discount: 0 },
   });
   const final = amount;
   const balance = Math.max(0, amount - advance);
   const toggleCondition = (condition: string) => setConditions((current) =>
     current.includes(condition) ? current.filter((item) => item !== condition) : [...current, condition]);
   const saveDraft = async (form: {
-    customerName: string; contactNumber: string; inDate: string; brand: string; mobileModel: string;
+    customerName: string; contactNumber: string; customerAddress: string; inDate: string; brand: string; mobileModel: string;
     imei: string; reportedFault: string; technicianNotes: string; remarks: string;
   }, printAfterSave = false) => {
     setFormError("");
@@ -1778,6 +2127,7 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
       normalizePhoneNumber(item.phone) === normalizePhoneNumber(form.contactNumber));
     const saved = await onSubmit({
       customerId: customer?.id ?? "", customerName: form.customerName.trim(), contactNumber: form.contactNumber.trim(),
+      customerAddress: form.customerAddress.trim(),
       inDate: businessDateTime(form.inDate),
       category: serviceCategory,
       brand: serviceCategory === "Electronics" ? serviceBrand.trim() : "",
@@ -1808,8 +2158,8 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
   return <>
     <PageHeader eyebrow="SERVICE DESK · NEW JOB" title="New service job" description="Record the device condition and repair request at intake."><Button variant="secondary" onClick={onCancel}><ArrowLeft size={15} /> Back to services</Button></PageHeader>
     <form className="billing-layout" onSubmit={submit} noValidate><div className="billing-main">
-      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">01</span><div><h2>Customer & intake</h2><p>Contact details and when the device arrived.</p></div></div><div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} /></FormField><FormField label="In date"><input className="input" type="date" {...register("inDate")} /></FormField><FormField label="Service bill number"><input className="input" required maxLength={120} value={serviceNumber} onChange={(event) => setServiceNumber(event.target.value)} /><span className="field-hint">Auto-generated; edit if needed.</span></FormField></div></section>
-      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Device details</h2><p>Identify the device and document its condition.</p></div></div><div className="form-grid two-col"><FormField label="Category"><div className="select-wrap category-select-wrap"><select className="input" value={serviceCategory} onChange={(event) => { setServiceCategory(event.target.value as ProductCategory); setServiceBrand(""); setServiceModel(""); setServiceProductName(""); }}><option value="Electronics">Electronics</option><option value="Accessories">Accessories</option></select><ChevronDown size={14} /></div></FormField>{serviceCategory === "Electronics" ? <><FormField label="Brand"><input className="input" placeholder="Samsung" value={serviceBrand} onChange={(event) => setServiceBrand(event.target.value)} /></FormField><FormField label="Model"><input className="input" placeholder="Galaxy S24" value={serviceModel} onChange={(event) => setServiceModel(event.target.value)} /></FormField></> : <FormField label="Product name"><input className="input" placeholder="e.g. Tempered glass, Charger…" value={serviceProductName} onChange={(event) => setServiceProductName(event.target.value)} /></FormField>}<FormField label="IMEI (optional)"><input className="input" placeholder="15-digit IMEI" {...register("imei")} /></FormField><FormField label="Reported fault" error={errors.reportedFault?.message}><input className="input" required placeholder="Describe the issue" {...register("reportedFault")} /></FormField></div><div className="condition-label">
+      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">01</span><div><h2>Customer & intake</h2><p>Contact details and when the device arrived.</p></div></div><div className="form-grid two-col"><FormField label="Customer name" error={errors.customerName?.message}><input className="input" placeholder="e.g. Priya Sharma" {...register("customerName")} /></FormField><FormField label="Contact number" error={errors.contactNumber?.message}><input className="input" inputMode="tel" placeholder="+91 98765 43210" {...register("contactNumber")} /></FormField><FormField label="Customer address" error={errors.customerAddress?.message}><textarea className="input textarea" maxLength={500} placeholder="Street, area, city" {...register("customerAddress")} /></FormField><FormField label="In date"><input className="input" type="date" {...register("inDate")} /></FormField><FormField label="Service bill number"><input className="input" required maxLength={120} value={serviceNumber} onChange={(event) => setServiceNumber(event.target.value)} /><span className="field-hint">Auto-generated; edit if needed.</span></FormField></div></section>
+      <section className="panel form-panel"><div className="form-section-head"><span className="step-number">02</span><div><h2>Device details</h2><p>Identify the device and document its condition.</p></div></div><div className="form-grid two-col"><FormField label="Category"><div className="select-wrap category-select-wrap"><select className="input" value={serviceCategory} onChange={(event) => { setServiceCategory(event.target.value as ProductCategory); setServiceBrand(""); setServiceModel(""); setServiceProductName(""); }}><option value="Electronics">Electronics</option><option value="Accessories">Accessories</option></select><ChevronDown size={14} /></div></FormField>{serviceCategory === "Electronics" ? <><FormField label="Brand"><input className="input" placeholder="Samsung" value={serviceBrand} onChange={(event) => setServiceBrand(event.target.value)} /></FormField><FormField label="Model"><input className="input" placeholder="Galaxy S24" value={serviceModel} onChange={(event) => setServiceModel(event.target.value)} /></FormField></> : <FormField label="Product name"><input className="input" placeholder="e.g. Tempered glass, Charger…" value={serviceProductName} onChange={(event) => setServiceProductName(event.target.value)} /></FormField>}<FormField label="IMEI (optional)"><div className="imei-input-wrap"><input className="input" maxLength={20} placeholder="15-digit IMEI" {...register("imei")} /><ScanBarcodeButton onScan={(value) => setValue("imei", value, { shouldValidate: true })} /></div></FormField><FormField label="Reported fault" error={errors.reportedFault?.message}><input className="input" required placeholder="Describe the issue" {...register("reportedFault")} /></FormField></div><div className="condition-label">
   Received condition <span>Select all that apply</span>
 </div>
 
@@ -1868,7 +2218,6 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
           onChange={(event) => setAmount(Number(event.target.value))}
         />
       </FormField>
-
       <FormField label="Advance amount (₹)">
         <input
           className="input"
@@ -1905,10 +2254,10 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
   </>;
 }
 
-function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, onPayment, onUpdate, onVendorChange, canEdit, settings }: {
+function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, onEdit, onDelete, onPayment, onUpdate, onVendorChange, canEdit, settings }: {
   services: ServiceJob[]; search: string; onSearch: (value: string) => void; onCreate: () => void;
   vendors: ServiceVendor[];
-  onView: (id: string) => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; canEdit: boolean;
+  onView: (id: string) => void; onEdit?: (service: ServiceJob) => void; onDelete?: (service: ServiceJob) => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; canEdit: boolean;
   onVendorChange: (service: ServiceJob, vendorId?: string) => void;
   settings?: ShopSettings;
 }) {
@@ -2029,16 +2378,18 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
     <PageHeader eyebrow="REPAIR & CARE" title="Service desk" description="Track every repair from intake to handover."><Button variant="secondary" onClick={exportServicesPdf}><Download size={15} /> Export PDF</Button><Button variant="secondary" onClick={() => clientNavigate("/services/ready")}><CheckCircle2 size={15} /> Ready for pickup</Button>{canEdit && <Button onClick={onCreate}><Plus size={16} /> New service job</Button>}</PageHeader>
     <div className="service-kpis">{(["Received", "In progress", "Ready", "Returned", "Refund"] as const).map((status) => <div className="service-kpi" key={status}><span className={`status-dot ${statusClass(status)}`} /><span>{status}</span><strong>{status === "Refund" ? services.filter((item) => item.returnOutcome === "Not repaired").length : services.filter((item) => item.status === status && item.returnOutcome !== "Not repaired").length}</strong></div>)}</div>
     <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => { onSearch(event.target.value); setPage(1); }} placeholder="Search bill, customer, model or IMEI…" /></label><div className="table-filters"><label className="select-wrap"><Filter size={15} /><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned", "Refund"] as const).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label><label className="select-wrap"><select value={paymentFilter} onChange={(event) => { setPaymentFilter(event.target.value); setPage(1); }}><option>All payments</option><option>Paid</option><option>Partially paid</option><option>Unpaid</option><option>Refund</option></select><ChevronDown size={14} /></label><div className="date-range compact-date-range"><label>From<input aria-label="Services from date" className="input date-filter" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /></label><label>To<input aria-label="Services to date" className="input date-filter" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /></label></div><label className="select-wrap"><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="date-desc">Newest</option><option value="date-asc">Oldest</option><option value="amount-desc">Highest total</option><option value="amount-asc">Lowest total</option></select><ChevronDown size={14} /></label></div></div>
-      {filtered.length ? <ServiceJobsTable services={filtered.slice((page - 1) * pageSize, page * pageSize)} vendors={vendors} onView={onView} onPayment={onPayment} onUpdate={onUpdate} onVendorChange={onVendorChange} canEdit={canEdit} settings={settings} /> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
+      {filtered.length ? <ServiceJobsTable services={filtered.slice((page - 1) * pageSize, page * pageSize)} vendors={vendors} onView={onView} onEdit={canEdit ? onEdit : undefined} onDelete={canEdit ? onDelete : undefined} onPayment={onPayment} onUpdate={onUpdate} onVendorChange={onVendorChange} canEdit={canEdit} settings={settings} /> : <EmptyState icon={Wrench} title={services.length ? "No matching service jobs" : "Ready for your first repair?"} detail={services.length ? "Try another search or status." : "Create a service job to track a device from intake to pickup."} action={!services.length && canEdit ? <Button onClick={onCreate}><Plus size={15} /> New service job</Button> : undefined} />}
       {filtered.length > 0 && <Pagination page={page} pages={pages} total={filtered.length} pageSize={pageSize} onPage={setPage} />}
     </div>
   </>;
 }
 
-function ServiceJobsTable({ services, vendors, onView, onPayment, onUpdate, onVendorChange, canEdit, settings }: {
+function ServiceJobsTable({ services, vendors, onView, onEdit, onDelete, onPayment, onUpdate, onVendorChange, canEdit, settings }: {
   services: ServiceJob[];
   vendors: ServiceVendor[];
   onView: (id: string) => void;
+  onEdit?: (service: ServiceJob) => void;
+  onDelete?: (service: ServiceJob) => void;
   onPayment: (id: string) => void;
   onUpdate: (service: ServiceJob) => void;
   onVendorChange: (service: ServiceJob, vendorId?: string) => void;
@@ -2048,7 +2399,7 @@ function ServiceJobsTable({ services, vendors, onView, onPayment, onUpdate, onVe
   const sortedVendors = vendors.slice().sort((a, b) => a.name.localeCompare(b.name));
   return <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{services.map((job) => {
     const due = Math.max(0, job.serviceAmount - job.discount - servicePaid(job));
-    return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(job.inDate)}</span></td><td><strong>{job.customerName}</strong></td><td><strong>{deviceLabel(job)}</strong></td><td>{job.contactNumber}</td><td>{job.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select>}</td><td><span className="muted-cell">{job.deliveryOutDate ? dateLabel(job.deliveryOutDate) : "—"}</span></td><td>{job.deliveryOutPerson || "—"}</td><td><strong>{money(job.returnOutcome === "Not repaired" ? 0 : job.serviceAmount)}</strong></td><td><button className="row-action" aria-label="View service details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}{settings && <button className="row-action" aria-label="Thermal invoice" title="Thermal invoice" onClick={() => printServiceInvoice(job, settings, true)}><Printer size={15} /></button>}</td></tr>;
+    return <tr key={job.id}><td><button className="table-primary-link" onClick={() => onView(job.id)}>{job.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(job.inDate)}</span></td><td><strong>{job.customerName}</strong></td><td><strong>{deviceLabel(job)}</strong></td><td>{job.contactNumber}</td><td>{job.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(job.status)}`} value={job.status} disabled={!canEdit || job.status === "Returned"} aria-label={`Update status for ${job.serviceNumber}`} onChange={(event) => onUpdate({ ...job, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : job.readyAt })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select>}</td><td><span className="muted-cell">{job.deliveryOutDate ? dateLabel(job.deliveryOutDate) : "—"}</span></td><td>{job.deliveryOutPerson || "—"}</td><td><strong>{money(job.returnOutcome === "Not repaired" ? 0 : job.serviceAmount)}</strong></td><td><WhatsAppAction phone={job.contactNumber} customerName={job.customerName} /><button className="row-action" aria-label="View service details" title="View details" onClick={() => onView(job.id)}><ArrowRight size={15} /></button>{onEdit && <button className="row-action" aria-label="Edit service" title="Edit service" onClick={() => onEdit(job)}><Pencil size={15} /></button>}{onDelete && <button className="row-action danger-action" aria-label="Delete service" title="Delete service" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}{canEdit && due > 0 && <button className="row-action" aria-label="Record service payment" title="Record payment" onClick={() => onPayment(job.id)}><Plus size={15} /></button>}{settings && <button className="row-action" aria-label="Thermal invoice" title="Thermal invoice" onClick={() => printServiceInvoice(job, settings, true)}><Printer size={15} /></button>}</td></tr>;
   })}</tbody></table></div>;
 }
 
@@ -2107,22 +2458,11 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
           {(canEditPayment || canReturn) && <div className="ready-card-actions">
   <Button
     variant="secondary"
-    disabled={!job.contactNumber?.trim()}
+    disabled={!whatsappUrl(job.contactNumber)}
     onClick={() => {
-      const digits = job.contactNumber.replace(/\D/g, "");
-      const whatsappNumber =
-        digits.length === 10 ? `91${digits}` :
-        digits.startsWith("0") && digits.length === 11
-          ? `91${digits.slice(1)}`
-          : digits;
-
       const message = `Hello ${job.customerName}! Your ${deviceLabel(job)} is ready for delivery at AH Mobiles. Service Bill: ${job.serviceNumber}. Please visit our shop to collect your device. Thank you!`;
-
-      window.open(
-        `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(message)}`,
-        "_blank",
-        "noopener,noreferrer"
-      );
+      const url = whatsappUrl(job.contactNumber, message);
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
     }}
   >
     <MessageCircle size={15} /> WhatsApp
@@ -2172,14 +2512,16 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
   </>;
 }
 
-function ServiceDetail({ service, vendor, settings, onBack, onPayment, onUpdate, onNotRepaired, canEdit }: {
-  service?: ServiceJob; vendor?: ServiceVendor; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; onUpdate: (service: ServiceJob) => void; onNotRepaired: (service: ServiceJob) => void; canEdit: boolean;
+function ServiceDetail({ service, vendor, settings, onBack, onPayment, onEdit, onDelete, onUpdate, onNotRepaired, canEdit }: {
+  service?: ServiceJob; vendor?: ServiceVendor; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; onEdit?: (service: ServiceJob) => void; onDelete?: (service: ServiceJob) => void; onUpdate: (service: ServiceJob) => void; onNotRepaired: (service: ServiceJob) => void; canEdit: boolean;
 }) {
   if (!service) return <NotFound title="Service job not found" backLabel="Back to services" onBack={onBack} />;
   const due = serviceDue(service);
   return <>
     <PageHeader eyebrow="SERVICE JOB" title={service.serviceNumber} description={`${deviceLabel(service)} · Received ${dateLabel(service.inDate)}`}>
       <Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> All services</Button>
+      {canEdit && onEdit && <Button variant="secondary" onClick={() => onEdit(service)}><Pencil size={15} /> Edit service</Button>}
+      {canEdit && onDelete && <Button variant="danger" onClick={() => onDelete(service)}><Trash2 size={15} /> Delete service</Button>}
       <Button variant="secondary" onClick={() => downloadServiceReceipt(service, settings)}><Download size={15} /> Download PDF</Button>
       <Button variant="secondary" onClick={() => printReceipt(service, settings)}><FileText size={15} /> Intake receipt</Button>
       <Button onClick={() => printServiceInvoice(service, settings, true)}><Printer size={15} /> Thermal bill</Button>
@@ -2188,7 +2530,7 @@ function ServiceDetail({ service, vendor, settings, onBack, onPayment, onUpdate,
     </PageHeader>
     <div className="detail-grid"><div className="detail-main">
       <section className="panel detail-panel"><div className="panel-heading"><div><h2>Repair status</h2><p>Track the job from intake through handover.</p></div><select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned"} onChange={(event) => onUpdate({ ...service, status: event.target.value as ServiceStatus, readyAt: event.target.value === "Ready" ? new Date().toISOString() : service.readyAt, deliveryOutDate: event.target.value === "Returned" ? new Date().toISOString() : service.deliveryOutDate })}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></div><div className="status-timeline">{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status, index) => { const completed = (["Received", "In progress", "Ready", "Returned"] as string[]).indexOf(service.status) >= index; return <div className={`timeline-step ${completed ? "done" : ""}`} key={status}><span>{completed ? <Check size={13} /> : index + 1}</span><strong>{status}</strong>{index < 3 && <i />}</div>; })}</div></section>
-      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Device & issue</h2><p>What came in, and what needs attention.</p></div></div><div className="detail-fields"><DetailField label="Customer" value={service.customerName} /><DetailField label="Contact number" value={service.contactNumber} /><DetailField label={service.category === "Accessories" ? "Product" : "Device"} value={deviceLabel(service)} /><DetailField label="Service vendor" value={vendor ? `${vendor.name} · ${vendor.phone}` : "Not assigned"} /><DetailField label="IMEI" value={service.imei || "Not recorded"} /><DetailField label="Reported fault" value={service.reportedFault} /><DetailField label="Received condition" value={service.receivedConditions.join(", ") || "Not specified"} /><DetailField label="Technician notes" value={service.technicianNotes || "—"} /><DetailField label="Additional remarks" value={service.remarks || "—"} /></div></section>
+      <section className="panel detail-panel"><div className="panel-heading"><div><h2>Device & issue</h2><p>What came in, and what needs attention.</p></div></div><div className="detail-fields"><DetailField label="Customer" value={service.customerName} /><DetailField label="Contact number" value={service.contactNumber} /><DetailField label="Customer address" value={service.customerAddress || "Not recorded"} /><DetailField label={service.category === "Accessories" ? "Product" : "Device"} value={deviceLabel(service)} /><DetailField label="Service vendor" value={vendor ? `${vendor.name} · ${vendor.phone}` : "Not assigned"} /><DetailField label="IMEI" value={service.imei || "Not recorded"} /><DetailField label="Reported fault" value={service.reportedFault} /><DetailField label="Received condition" value={service.receivedConditions.join(", ") || "Not specified"} /><DetailField label="Technician notes" value={service.technicianNotes || "—"} /><DetailField label="Additional remarks" value={service.remarks || "—"} /></div></section>
       <section className="panel detail-panel"><div className="panel-heading">
   <div>
     <h2>Payment history</h2>
@@ -2200,14 +2542,20 @@ function ServiceDetail({ service, vendor, settings, onBack, onPayment, onUpdate,
   </>;
 }
 
-function SaleDetail({ sale, settings, onBack, onPayment, canEdit }: {
-  sale?: Sale; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; canEdit: boolean;
+function SaleDetail({ sale, settings, onBack, onPayment, onEdit, onDelete, canEdit }: {
+  sale?: Sale; settings: ShopSettings; onBack: () => void; onPayment: (id: string) => void; onEdit?: (sale: Sale) => void; onDelete?: (sale: Sale) => void; canEdit: boolean;
 }) {
   if (!sale) return <NotFound title="Invoice not found" backLabel="Back to sales" onBack={onBack} />;
   const paid = paymentTotal(sale.payments);
   const due = Math.max(0, sale.finalAmount - paid);
   return <>
-    <PageHeader eyebrow="SALES INVOICE" title={sale.invoiceNumber} description={`${sale.customerName} · ${dateLabel(sale.invoiceDate)}`}><Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> Sales history</Button><Button variant="secondary" onClick={() => downloadInvoice(sale, settings)}><Download size={15} /> Download PDF</Button><Button onClick={() => printInvoice(sale, settings)}><Printer size={15} /> Print invoice</Button></PageHeader>
+    <PageHeader eyebrow="SALES INVOICE" title={sale.invoiceNumber} description={`${sale.customerName} · ${dateLabel(sale.invoiceDate)}`}>
+      <Button variant="secondary" onClick={onBack}><ArrowLeft size={15} /> Sales history</Button>
+      {canEdit && onEdit && <Button variant="secondary" onClick={() => onEdit(sale)}><Pencil size={15} /> Edit sale</Button>}
+      {canEdit && onDelete && <Button variant="danger" onClick={() => onDelete(sale)}><Trash2 size={15} /> Delete sale</Button>}
+      <Button variant="secondary" onClick={() => downloadInvoice(sale, settings)}><Download size={15} /> Download PDF</Button>
+      <Button onClick={() => printInvoice(sale, settings)}><Printer size={15} /> Print invoice</Button>
+    </PageHeader>
     <div className="detail-grid"><div className="detail-main"><InvoicePreview sale={sale} settings={settings} /><section className="panel detail-panel"><div className="panel-heading"><div><h2>Payment history</h2><p>Every payment is listed separately.</p></div>{canEdit && due > 0 && <Button variant="secondary" onClick={() => onPayment(sale.id)}><Plus size={14} /> Add payment</Button>}</div>{sale.payments.length ? <div className="payment-history">{sale.payments.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>Amount received</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded yet.</div>}</section></div><aside className="detail-aside"><div className="panel total-card"><div className="total-card-title"><span className="total-icon"><CreditCard size={17} /></span><span><strong>Payment summary</strong><small>{statusOf(sale.finalAmount, paid)}</small></span></div><div className="total-lines"><span>Subtotal <strong>{money(sale.subtotal)}</strong></span><span>Discount <strong>− {money(sale.discount)}</strong></span><span>Tax <strong>{money(sale.tax)}</strong></span><div className="total-final"><span>Invoice total</span><strong>{money(sale.finalAmount)}</strong></div><span>Paid <strong>{money(paid)}</strong></span></div><div className={`balance-box ${due <= 0 ? "settled" : ""}`}><span>Balance due</span><strong>{money(due)}</strong></div>{canEdit && due > 0 && <Button className="btn-full" onClick={() => onPayment(sale.id)}><CreditCard size={15} /> Record payment</Button>}</div></aside></div>
   </>;
 }
@@ -2221,8 +2569,15 @@ function InvoicePreview({ sale, settings }: { sale: Sale; settings: ShopSettings
       </div>
       <div className="invoice-label"><strong>INVOICE</strong><span>{sale.invoiceNumber}</span><small>{dateLabel(sale.invoiceDate)}</small></div>
     </div>
-    <div className="invoice-customer"><span>BILLED TO</span><strong>{sale.customerName}</strong><small>{sale.contactNumber}</small></div>
-    <div className="table-scroll"><table className="invoice-table"><thead><tr><th>ITEM</th><th>IMEI / SERIAL</th><th>QTY</th><th>RATE</th><th>DISCOUNT</th><th>AMOUNT</th></tr></thead><tbody>{sale.products.map((product) => <tr key={product.id}><td><strong>{deviceLabel(product)}</strong></td><td>{product.imei || "—"}</td><td>{product.quantity}</td><td>{money(product.rate)}</td><td>{money(product.discount)}</td><td><strong>{money(product.quantity * product.rate - product.discount)}</strong></td></tr>)}</tbody></table></div>
+    <div className="invoice-customer"><span>BILLED TO</span><strong>{sale.customerName}</strong><small>{sale.contactNumber}</small>{sale.customerAddress && <small>{sale.customerAddress}</small>}</div>
+    <div className="table-scroll"><table className="invoice-table">
+      <colgroup><col style={{ width: "23%" }} /><col style={{ width: "23%" }} /><col style={{ width: "8%" }} /><col style={{ width: "14%" }} /><col style={{ width: "15%" }} /><col style={{ width: "17%" }} /></colgroup>
+      <thead><tr><th scope="col">ITEM</th><th scope="col">IMEI / SERIAL</th><th scope="col">QTY</th><th scope="col">RATE</th><th scope="col">DISCOUNT</th><th scope="col">AMOUNT</th></tr></thead>
+      <tbody>{sale.products.map((product) => <tr key={product.id}>
+        <td><strong>{deviceLabel(product)}</strong></td><td>{product.imei || "—"}</td><td>{product.quantity}</td>
+        <td>{money(product.rate)}</td><td>{money(product.discount)}</td><td><strong>{money(product.quantity * product.rate - product.discount)}</strong></td>
+      </tr>)}</tbody>
+    </table></div>
     <div className="invoice-totals"><span>Subtotal <strong>{money(sale.subtotal)}</strong></span><span>Discount <strong>− {money(sale.discount)}</strong></span><span>Tax <strong>{money(sale.tax)}</strong></span><span className="invoice-grand">Invoice total <strong>{money(sale.finalAmount)}</strong></span><span>Paid <strong>{money(paymentTotal(sale.payments))}</strong></span><span>Balance due <strong>{money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></span></div>
     <div className="invoice-footer-note">{settings.invoiceFooter}</div><div className="invoice-signatures"><span>Customer signature</span><span>Authorized signature</span></div>
   </div>;
@@ -2244,18 +2599,31 @@ function downloadInvoice(sale: Sale, settings: ShopSettings) {
   pdf.setFont("helvetica", "normal"); pdf.setFontSize(10); pdf.text(sale.invoiceNumber, 194, 27, { align: "right" }); pdf.text(dateLabel(sale.invoiceDate), 194, 33, { align: "right" });
   pdf.setDrawColor(225, 230, 238); pdf.line(16, 43, 194, 43);
   pdf.setFont("helvetica", "bold"); pdf.text("BILLED TO", 16, 53); pdf.setFont("helvetica", "normal"); pdf.text(sale.customerName, 16, 60); pdf.text(sale.contactNumber, 16, 66);
-  let y = 81;
-  pdf.setFillColor(245, 247, 251); pdf.rect(16, y - 6, 178, 10, "F");
-  pdf.setFont("helvetica", "bold"); pdf.setFontSize(8); pdf.text("ITEM", 18, y); pdf.text("IMEI", 92, y); pdf.text("QTY", 135, y); pdf.text("RATE", 151, y); pdf.text("TOTAL", 192, y, { align: "right" });
+  const customerAddressLines = sale.customerAddress ? pdf.splitTextToSize(sale.customerAddress, 75) as string[] : [];
+  if (customerAddressLines.length) pdf.text(customerAddressLines, 16, 72);
+  let y = 81 + Math.max(0, customerAddressLines.length - 1) * 5;
+  const columnDividers = [70, 116, 132, 153, 176];
+  const drawTableHeader = (baseline: number) => {
+    pdf.setFillColor(245, 247, 251); pdf.rect(16, baseline - 6, 178, 10, "F");
+    pdf.setFont("helvetica", "bold"); pdf.setFontSize(8);
+    pdf.text("ITEM", 18, baseline); pdf.text("IMEI / SERIAL", 74, baseline); pdf.text("QTY", 126, baseline, { align: "right" }); pdf.text("RATE", 150, baseline, { align: "right" }); pdf.text("DISCOUNT", 174, baseline, { align: "right" }); pdf.text("AMOUNT", 192, baseline, { align: "right" });
+    pdf.setDrawColor(225, 230, 238);
+    columnDividers.forEach((x) => pdf.line(x, baseline - 6, x, baseline + 5));
+  };
+  drawTableHeader(y);
   y += 11; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8.5);
   sale.products.forEach((product) => {
-    if (y > 250) { pdf.addPage(); y = 22; }
-    pdf.text(deviceLabel(product).slice(0, 38), 18, y);
-    pdf.text(product.imei || "—", 92, y);
-    pdf.text(String(product.quantity), 137, y);
-    pdf.text(pdfMoney(product.rate), 151, y);
+    if (y > 250) { pdf.addPage(); y = 22; drawTableHeader(y); y += 11; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8.5); }
+    const rowTop = y - 6;
+    pdf.text(deviceLabel(product).slice(0, 27), 18, y);
+    pdf.text(product.imei || "—", 74, y);
+    pdf.text(String(product.quantity), 126, y, { align: "right" });
+    pdf.text(pdfMoney(product.rate), 150, y, { align: "right" });
+    pdf.text(pdfMoney(product.discount), 174, y, { align: "right" });
     pdf.text(pdfMoney(product.quantity * product.rate - product.discount), 192, y, { align: "right" });
     y += 9;
+    pdf.setDrawColor(225, 230, 238);
+    columnDividers.forEach((x) => pdf.line(x, rowTop, x, y - 3));
   });
   y += 8; pdf.setDrawColor(225, 230, 238); pdf.line(117, y - 4, 194, y - 4);
   const totals: [string, string][] = [["Subtotal", pdfMoney(sale.subtotal)], ["Discount", `- ${pdfMoney(sale.discount)}`], ["Tax", pdfMoney(sale.tax)], ["Invoice total", pdfMoney(sale.finalAmount)], ["Paid", pdfMoney(paymentTotal(sale.payments))], ["Balance due", pdfMoney(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))]];
@@ -2279,14 +2647,14 @@ function printInvoice(sale: Sale, settings: ShopSettings) {
   const bodyLayout = thermal ? "body{width:70mm;padding:0}.head{gap:8px}.head h2{font-size:16px}table{margin:18px 0}th,td{padding:5px 2px;font-size:10px}aside{width:100%}.sign{margin-top:42px}" : "body{padding:32px}.head{padding-bottom:18px}table{margin:28px 0}th,td{padding:10px 6px}aside{margin-left:auto;width:260px}.sign{margin-top:64px}";
   const logo = settings.logoDataUrl ? `<img class="shop-logo" src="${escapeHtml(settings.logoDataUrl)}" alt="">` : "";
   const gstin = settings.gstin ? `<div class="muted">GSTIN: ${escapeHtml(settings.gstin)}</div>` : "";
-  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:13px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #ddd}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:40px;height:40px;object-fit:contain}.muted{color:#666;font-size:12px}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #ddd}th{font-size:10px;color:#666}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #bbb;padding-top:10px}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><h2>${escapeHtml(settings.shopName)}</h2><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p>${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
+  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:13px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #ddd}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:40px;height:40px;object-fit:contain}.muted{color:#666;font-size:12px}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #ddd}th:not(:last-child),td:not(:last-child){border-right:1px solid #ddd}th{font-size:10px;color:#666}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #bbb;padding-top:10px}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><h2>${escapeHtml(settings.shopName)}</h2><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}${sale.customerAddress ? `<br>${escapeHtml(sale.customerAddress)}` : ""}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p>${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
   popup.document.close();
 }
 
 function printReceipt(service: ServiceJob, settings: ShopSettings) {
   const popup = window.open("", "_blank", "width=500,height=720");
   if (!popup) { window.alert("Please allow pop-ups to print this receipt."); return; }
-  popup.document.write(`<html><head><title>${escapeHtml(service.serviceNumber)}</title><style>body{font:13px Arial;padding:24px;color:#111}h2{margin-bottom:4px}p{line-height:1.55}.line{border-top:1px dashed #888;margin:18px 0}.sign{margin-top:42px}@media print{@page{size:80mm auto;margin:5mm}}</style></head><body><h2>${escapeHtml(settings.shopName)}</h2><p>${escapeHtml(settings.address)}<br>${escapeHtml(settings.phone)}<br>Service receipt · ${escapeHtml(service.serviceNumber)}<br>In date: ${dateLabel(service.inDate)}</p><div class="line"></div><p><strong>${escapeHtml(service.customerName)}</strong><br>${escapeHtml(service.contactNumber)}<br>${escapeHtml(deviceLabel(service))}<br>IMEI: ${escapeHtml(service.imei || "—")}</p><p>Reported fault: ${escapeHtml(service.reportedFault)}<br>Condition: ${escapeHtml(service.receivedConditions.join(", "))}</p><div class="line"></div><p>Estimate: ${money(service.serviceAmount - service.discount)}<br>Advance: ${money(servicePaid(service))}<br>Balance: ${money(serviceDue(service))}</p><p>Device passwords and patterns are never printed.</p><p class="sign">Customer acknowledgment __________________</p><script>window.onload=()=>window.print()</script></body></html>`);
+  popup.document.write(`<html><head><title>${escapeHtml(service.serviceNumber)}</title><style>body{font:13px Arial;padding:24px;color:#111}h2{margin-bottom:4px}p{line-height:1.55}.line{border-top:1px dashed #888;margin:18px 0}.sign{margin-top:42px}@media print{@page{size:80mm auto;margin:5mm}}</style></head><body><h2>${escapeHtml(settings.shopName)}</h2><p>${escapeHtml(settings.address)}<br>${escapeHtml(settings.phone)}<br>Service receipt · ${escapeHtml(service.serviceNumber)}<br>In date: ${dateLabel(service.inDate)}</p><div class="line"></div><p><strong>${escapeHtml(service.customerName)}</strong><br>${escapeHtml(service.contactNumber)}${service.customerAddress ? `<br>${escapeHtml(service.customerAddress)}` : ""}<br>${escapeHtml(deviceLabel(service))}<br>IMEI: ${escapeHtml(service.imei || "—")}</p><p>Reported fault: ${escapeHtml(service.reportedFault)}<br>Condition: ${escapeHtml(service.receivedConditions.join(", "))}</p><div class="line"></div><p>Estimate: ${money(service.serviceAmount - service.discount)}<br>Advance: ${money(servicePaid(service))}<br>Balance: ${money(serviceDue(service))}</p><p>Device passwords and patterns are never printed.</p><p class="sign">Customer acknowledgment __________________</p><script>window.onload=()=>window.print()</script></body></html>`);
   popup.document.close();
 }
 
@@ -2386,6 +2754,7 @@ function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceT
     <div class="divider"></div>
     <div class="meta-row"><span>Customer:</span><strong>${escapeHtml(service.customerName)}</strong></div>
     <div class="meta-row"><span>Contact:</span><span>${escapeHtml(service.contactNumber)}</span></div>
+    ${service.customerAddress ? `<div class="item-detail">Address: ${escapeHtml(service.customerAddress)}</div>` : ""}
     ${service.deliveryOutPerson ? `<div class="meta-row"><span>Picked by:</span><span>${escapeHtml(service.deliveryOutPerson)}</span></div>` : ""}
     <div class="divider"></div>
     <div class="item-block">
@@ -2432,6 +2801,7 @@ function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceT
         <div class="muted">BILLED TO:</div>
         <strong>${escapeHtml(service.customerName)}</strong>
         <div>${escapeHtml(service.contactNumber)}</div>
+        ${service.customerAddress ? `<div>${escapeHtml(service.customerAddress)}</div>` : ""}
       </div>
       <div>
         <div class="muted">JOB DETAILS:</div>
@@ -2509,6 +2879,11 @@ function downloadServiceReceipt(service: ServiceJob, settings: ShopSettings) {
   pdf.text(`In date: ${dateLabel(service.inDate)}`, 7, y); y += 5; pdf.line(7, y, 73, y); y += 8;
   pdf.setFont("helvetica", "bold"); pdf.setFontSize(9); pdf.text(service.customerName.slice(0, 35), 7, y); y += 6;
   pdf.setFont("helvetica", "normal"); pdf.setFontSize(8); pdf.text(service.contactNumber, 7, y); y += 6;
+  if (service.customerAddress) {
+    const addressLines = pdf.splitTextToSize(service.customerAddress, 66) as string[];
+    pdf.text(addressLines, 7, y);
+    y += addressLines.length * 4 + 2;
+  }
   pdf.text(deviceLabel(service).slice(0, 34), 7, y); y += 6; pdf.text(`IMEI: ${service.imei || "—"}`, 7, y); y += 8;
   pdf.text(`Fault: ${service.reportedFault}`.slice(0, 70), 7, y); y += 7;
   pdf.text(`Condition: ${service.receivedConditions.join(", ")}`.slice(0, 70), 7, y); y += 7; pdf.line(7, y, 73, y); y += 8;
@@ -2535,7 +2910,58 @@ function CustomersPage({ customers, sales, services, search, onSearch, onAdd, se
       ...customerSales.flatMap((sale) => sale.payments.map((payment) => ({ ...payment, reference: sale.invoiceNumber }))),
       ...customerServices.flatMap((service) => service.payments.map((payment) => ({ ...payment, reference: service.serviceNumber }))),
     ].sort((a, b) => b.date.localeCompare(a.date));
-    return <><PageHeader eyebrow="CUSTOMER PROFILE" title={customer.name} description={`Customer since ${dateLabel(customer.createdAt)}`}><Button variant="secondary" onClick={() => onEdit(customer)}><Pencil size={14} /> Edit customer</Button><Button variant="secondary" onClick={() => onView("")}><ArrowLeft size={15} /> All customers</Button></PageHeader><div className="customer-profile-head"><span className="customer-profile-avatar">{customer.name[0]?.toUpperCase()}</span><div><h2>{customer.name}</h2><span>{customer.phone}{customer.email ? ` · ${customer.email}` : ""}</span></div><div className="customer-profile-stats"><span>Sales<strong>{customerSales.length}</strong></span><span>Service jobs<strong>{customerServices.length}</strong></span><span>Outstanding<strong>{money(outstanding)}</strong></span></div></div><div className="panel table-panel"><div className="panel-heading"><div><h2>Sales history</h2><p>Invoices connected to this customer.</p></div></div>{customerSales.length ? <SalesTable sales={customerSales} /> : <div className="quiet-empty">No sales recorded for this customer.</div>}</div><div className="panel table-panel customer-services"><div className="panel-heading"><div><h2>Service history</h2><p>Repair jobs connected to this customer.</p></div></div>{customerServices.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL</th><th>DEVICE</th><th>REPORTED FAULT</th><th>STATUS</th><th>DATE</th></tr></thead><tbody>{customerServices.map((service) => <tr key={service.id}><td>{service.serviceNumber}</td><td>{deviceLabel(service)}</td><td>{service.reportedFault}</td><td><StatusBadge status={service.status} /></td><td>{dateLabel(service.inDate)}</td></tr>)}</tbody></table></div> : <div className="quiet-empty">No service jobs recorded for this customer.</div>}</div><div className="panel table-panel customer-services"><div className="panel-heading"><div><h2>Payment history</h2><p>All recorded payments across this customer&apos;s invoices.</p></div></div>{paymentHistory.length ? <div className="payment-history">{paymentHistory.map((payment) => <div className="payment-row" key={payment.id}><span className="payment-method-icon"><CreditCard size={15} /></span><span><strong>{payment.reference}</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span><strong className="paid-amount">{money(payment.amount)}</strong></div>)}</div> : <div className="quiet-empty">No payments recorded for this customer.</div>}</div></>;
+    return (
+      <>
+        <PageHeader eyebrow="CUSTOMER PROFILE" title={customer.name} description={`Customer since ${dateLabel(customer.createdAt)}`}>
+          <Button variant="secondary" onClick={() => onEdit(customer)}><Pencil size={14} /> Edit customer</Button>
+          <Button variant="secondary" onClick={() => onView("")}><ArrowLeft size={15} /> All customers</Button>
+        </PageHeader>
+        <div className="customer-profile-head">
+          <span className="customer-profile-avatar">{customer.name[0]?.toUpperCase()}</span>
+          <div className="customer-profile-contact">
+            <h2>{customer.name}</h2>
+            <div className="customer-contact-row">
+              <span>Contact: <a href={`tel:${customer.phone}`}>{customer.phone}</a></span>
+              <WhatsAppAction phone={customer.phone} customerName={customer.name} />
+              {customer.email && <span>{customer.email}</span>}
+            </div>
+            {customer.address && <span className="customer-profile-address">Address: {customer.address}</span>}
+          </div>
+          <div className="customer-profile-stats">
+            <span>Sales<strong>{customerSales.length}</strong></span>
+            <span>Service jobs<strong>{customerServices.length}</strong></span>
+            <span>Outstanding<strong>{money(outstanding)}</strong></span>
+          </div>
+        </div>
+        <div className="panel table-panel">
+          <div className="panel-heading"><div><h2>Sales history</h2><p>Invoices connected to this customer.</p></div></div>
+          {customerSales.length ? <SalesTable sales={customerSales} /> : <div className="quiet-empty">No sales recorded for this customer.</div>}
+        </div>
+        <div className="panel table-panel customer-services">
+          <div className="panel-heading"><div><h2>Service history</h2><p>Repair jobs connected to this customer.</p></div></div>
+          {customerServices.length ? (
+            <div className="table-scroll">
+              <table className="data-table">
+                <thead><tr><th>SERVICE BILL</th><th>DEVICE</th><th>REPORTED FAULT</th><th>STATUS</th><th>DATE</th></tr></thead>
+                <tbody>{customerServices.map((service) => <tr key={service.id}><td>{service.serviceNumber}</td><td>{deviceLabel(service)}</td><td>{service.reportedFault}</td><td><StatusBadge status={service.status} /></td><td>{dateLabel(service.inDate)}</td></tr>)}</tbody>
+              </table>
+            </div>
+          ) : <div className="quiet-empty">No service jobs recorded for this customer.</div>}
+        </div>
+        <div className="panel table-panel customer-services">
+          <div className="panel-heading"><div><h2>Payment history</h2><p>All recorded payments across this customer&apos;s invoices.</p></div></div>
+          {paymentHistory.length ? (
+            <div className="payment-history">{paymentHistory.map((payment) => (
+              <div className="payment-row" key={payment.id}>
+                <span className="payment-method-icon"><CreditCard size={15} /></span>
+                <span><strong>{payment.reference}</strong><small>{dateLabel(payment.date)}{payment.notes ? ` · ${payment.notes}` : ""}</small></span>
+                <strong className="paid-amount">{money(payment.amount)}</strong>
+              </div>
+            ))}</div>
+          ) : <div className="quiet-empty">No payments recorded for this customer.</div>}
+        </div>
+      </>
+    );
   }
   const [customerType, setCustomerType] = useState<
   "sales" | "service" | "vendor"
@@ -2750,7 +3176,7 @@ const filtered = customers.filter((customer) => {
   </>;
 }
 
-function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selectedId, onSelect, onAdd, onCreateService, onEditService, onMarkNotRepaired, onStatusChange, onDeleteVendor, canEdit }: {
+function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selectedId, onSelect, onAdd, onCreateService, onEditService, onDeleteService, onMarkNotRepaired, onStatusChange, onDeleteVendor, canEdit }: {
   vendors: ServiceVendor[];
   vendorServices: VendorService[];
   search: string;
@@ -2760,6 +3186,7 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
   onAdd: () => void;
   onCreateService: (vendor: ServiceVendor) => void;
   onEditService: (service: VendorService) => void;
+  onDeleteService: (service: VendorService) => void;
   onMarkNotRepaired: (service: VendorService) => void;
   onStatusChange: (service: VendorService, status: ServiceStatus) => void;
   onDeleteVendor: (vendor: ServiceVendor) => void;
@@ -2884,7 +3311,7 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
           </div>
         </div>
         {filteredVendorServices.length
-          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}><td><button className="table-primary-link" onClick={() => onEditService(service)} title="View customer & product details">{service.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(service.inDate)}</span></td><td>{service.customerName}</td><td><strong>{service.brand} {service.mobileModel}</strong></td><td>{service.customerNumber}</td><td>{service.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned" || service.returnOutcome === "Not repaired"} aria-label={`Update status for ${service.serviceNumber}`} title={service.status === "Returned" || service.returnOutcome === "Not repaired" ? "This vendor service has already been returned and its status is locked." : undefined} onChange={(event) => { if (event.target.value === "__not_repaired__") onMarkNotRepaired(service); else onStatusChange(service, event.target.value as ServiceStatus); }}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}<option value="__not_repaired__">Not repaired · Return device</option></select>}</td><td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td><td>{service.deliveryCustomer || "—"}</td><td><strong>{money(service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge)}</strong></td></tr>)}</tbody></table></div>
+          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}><td><button className="table-primary-link" onClick={() => onEditService(service)} title="View customer & product details">{service.serviceNumber}</button></td><td><span className="muted-cell">{dateLabel(service.inDate)}</span></td><td>{service.customerName}</td><td><strong>{service.brand} {service.mobileModel}</strong></td><td>{service.customerNumber}</td><td>{service.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned" || service.returnOutcome === "Not repaired"} aria-label={`Update status for ${service.serviceNumber}`} title={service.status === "Returned" || service.returnOutcome === "Not repaired" ? "This vendor service has already been returned and its status is locked." : undefined} onChange={(event) => { if (event.target.value === "__not_repaired__") onMarkNotRepaired(service); else onStatusChange(service, event.target.value as ServiceStatus); }}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}<option value="__not_repaired__">Not repaired · Return device</option></select>}</td><td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td><td>{service.deliveryCustomer || "—"}</td><td><strong>{money(service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge)}</strong></td>          <td><WhatsAppAction phone={service.customerNumber} customerName={service.customerName} /><button className="row-action" aria-label="View vendor service details" title="View details" onClick={() => onEditService(service)}><ArrowRight size={15} /></button>{canEdit && <button className="row-action" aria-label="Edit vendor service" title="Edit details" onClick={() => onEditService(service)}><Pencil size={15} /></button>}{canEdit && <button className="row-action danger-action" aria-label="Delete vendor service" title="Delete service" onClick={() => onDeleteService(service)}><Trash2 size={15} /></button>}</td></tr>)}</tbody></table></div>
           : <EmptyState icon={Wrench} title={servicesForVendor.length ? "No matching vendor services" : "No vendor services yet"} detail={servicesForVendor.length ? "Adjust your search or filters to see matching services." : "Add a service here to save it only under this vendor."} action={!servicesForVendor.length && canEdit ? <Button onClick={() => onCreateService(selectedVendor)}><Plus size={15} /> Add service</Button> : undefined} />}
       </div>
     </>;
@@ -2907,9 +3334,9 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
 function CustomerModal({ title = "Add customer", initial, onClose, onSave }: {
   title?: string;
   initial?: Customer;
-  onClose: () => void; onSave: (name: string, phone: string, email: string) => Promise<void>;
+  onClose: () => void; onSave: (name: string, phone: string, email: string, address: string) => Promise<void>;
 }) {
-  const [values, setValues] = useState({ name: initial?.name ?? "", phone: initial?.phone ?? "", email: initial?.email ?? "" });
+  const [values, setValues] = useState({ name: initial?.name ?? "", phone: initial?.phone ?? "", email: initial?.email ?? "", address: initial?.address ?? "" });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const submit = async (event: FormEvent) => {
@@ -2917,11 +3344,11 @@ function CustomerModal({ title = "Add customer", initial, onClose, onSave }: {
     const result = customerSchema.safeParse(values);
     if (!result.success) { setError(result.error.issues[0]?.message ?? "Check the customer details."); return; }
     setSaving(true);
-    try { await onSave(values.name, values.phone, values.email); }
+    try { await onSave(values.name, values.phone, values.email, values.address); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save this customer."); }
     finally { setSaving(false); }
   };
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">CUSTOMER DIRECTORY</span><h2>{title}</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><FormField label="Full name"><input className="input" value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} placeholder="e.g. Priya Sharma" /></FormField><FormField label="Contact number"><input className="input" value={values.phone} onChange={(event) => setValues({ ...values, phone: event.target.value })} placeholder="+91 98765 43210" /></FormField><FormField label="Email (optional)"><input className="input" type="email" value={values.email} onChange={(event) => setValues({ ...values, email: event.target.value })} placeholder="priya@example.com" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Pencil size={14} /> {title}</>}</Button></div></form></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">CUSTOMER DIRECTORY</span><h2>{title}</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><FormField label="Full name"><input className="input" value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} placeholder="e.g. Priya Sharma" /></FormField><FormField label="Contact number"><input className="input" inputMode="tel" value={values.phone} onChange={(event) => setValues({ ...values, phone: event.target.value })} placeholder="+91 98765 43210" /></FormField><FormField label="Address"><textarea className="input textarea" maxLength={500} value={values.address} onChange={(event) => setValues({ ...values, address: event.target.value })} placeholder="Street, area, city" /></FormField><FormField label="Email (optional)"><input className="input" type="email" value={values.email} onChange={(event) => setValues({ ...values, email: event.target.value })} placeholder="priya@example.com" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Pencil size={14} /> {title}</>}</Button></div></form></div>;
 }
 
 function ServiceVendorModal({ onClose, onSave }: {
@@ -2980,6 +3407,7 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
     serviceNumber: initialServiceNumber,
     inDate: dateInputValue(),
     customerName: "",
+    customerAddress: "",
     brand: "",
     mobileModel: "",
     customerNumber: "",
@@ -3037,6 +3465,7 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
     <FormField label="In date"><input className="input" type="date" value={values.inDate} onChange={(event) => update("inDate", event.target.value)} /></FormField>
     <FormField label="In person"><input className="input" value={values.customerName} onChange={(event) => update("customerName", event.target.value)} /></FormField>
     <FormField label="Customer number"><input className="input" inputMode="tel" value={values.customerNumber} onChange={(event) => update("customerNumber", event.target.value)} /></FormField>
+    <FormField label="Customer address"><textarea className="input textarea" maxLength={500} value={values.customerAddress} onChange={(event) => update("customerAddress", event.target.value)} placeholder="Street, area, city" /></FormField>
     <FormField label="Fault"><textarea className="input textarea" value={values.fault} onChange={(event) => update("fault", event.target.value)} placeholder="Describe the device fault or issue" /></FormField>
     <FormField label="Brand"><input className="input" value={values.brand} onChange={(event) => update("brand", event.target.value)} /></FormField>
     <FormField label="Model"><input className="input" value={values.mobileModel} onChange={(event) => update("mobileModel", event.target.value)} /></FormField>
@@ -3103,18 +3532,21 @@ function VendorServiceDetailModal({
   vendor,
   canEdit,
   onClose,
+  onDelete,
   onSave,
 }: {
   service: VendorService;
   vendor: ServiceVendor;
   canEdit: boolean;
   onClose: () => void;
+  onDelete?: (service: VendorService) => void;
   onSave: (updated: Partial<VendorService>) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [values, setValues] = useState({
     customerName: service.customerName,
     customerNumber: service.customerNumber,
+    customerAddress: service.customerAddress || "",
     brand: service.brand,
     mobileModel: service.mobileModel,
     fault: service.fault || "",
@@ -3170,6 +3602,7 @@ function VendorServiceDetailModal({
       await onSave({
         customerName: values.customerName.trim(),
         customerNumber: values.customerNumber.trim(),
+        customerAddress: values.customerAddress.trim(),
         brand: values.brand.trim(),
         mobileModel: values.mobileModel.trim(),
         fault: values.fault.trim(),
@@ -3220,6 +3653,7 @@ function VendorServiceDetailModal({
                 <div className="detail-fields" style={{ padding: "12px 14px" }}>
                   <DetailField label="In person / Name" value={service.customerName} />
                   <DetailField label="Customer number" value={service.customerNumber} />
+                  <DetailField label="Customer address" value={service.customerAddress || "—"} />
                   <DetailField label="Out person / Delivered to" value={service.deliveryCustomer || "—"} />
                   <DetailField label="Delivery date" value={service.deliveryDate ? dateLabel(service.deliveryDate) : "—"} />
                 </div>
@@ -3251,12 +3685,17 @@ function VendorServiceDetailModal({
             </div>
 
             <div className="modal-footer" style={{ padding: "12px 20px" }}>
+              {canEdit && onDelete && (
+                <Button variant="danger" type="button" onClick={() => onDelete(service)}>
+                  <Trash2 size={14} /> Delete service
+                </Button>
+              )}
               {canEdit && (
-                <Button variant="secondary" onClick={() => setEditing(true)}>
+                <Button variant="secondary" type="button" onClick={() => setEditing(true)}>
                   <Pencil size={14} /> Edit details
                 </Button>
               )}
-              <Button onClick={onClose}>Close</Button>
+              <Button type="button" onClick={onClose}>Close</Button>
             </div>
           </>
         ) : (
@@ -3277,6 +3716,15 @@ function VendorServiceDetailModal({
                   value={values.customerNumber}
                   onChange={(event) => update("customerNumber", event.target.value)}
                   required
+                />
+              </FormField>
+              <FormField label="Customer address">
+                <textarea
+                  className="input textarea"
+                  maxLength={500}
+                  value={values.customerAddress}
+                  onChange={(event) => update("customerAddress", event.target.value)}
+                  placeholder="Street, area, city"
                 />
               </FormField>
               <FormField label="Brand">
@@ -3403,6 +3851,581 @@ function VendorServiceDeliveryModal({ service, vendor, onClose, onSave }: {
     }
   };
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">{vendor.name.toUpperCase()} · {service.serviceNumber}</span><h2>Delivery details</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><FormField label="Delivery date"><input className="input" type="date" value={deliveryDate} onChange={(event) => setDeliveryDate(event.target.value)} required /><span className="field-hint">Defaults to today.</span></FormField><FormField label="Delivery customer"><input className="input" value={deliveryCustomer} onChange={(event) => setDeliveryCustomer(event.target.value)} placeholder="Name of the person receiving the device" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} /> Save delivery details</>}</Button></div></form></div>;
+}
+
+function ConfirmDeleteModal({
+  title,
+  itemName,
+  description,
+  confirmLabel = "Delete",
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  itemName?: string;
+  description: string;
+  confirmLabel?: string;
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const handleConfirm = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await onConfirm();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Deletion failed.");
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (!busy && e.target === e.currentTarget) onCancel(); }}>
+      <div className="modal-box compact-modal" role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div>
+            {itemName && <span className="eyebrow">{itemName}</span>}
+            <h2>{title}</h2>
+          </div>
+          <button className="icon-btn" type="button" disabled={busy} onClick={onCancel} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="modal-fields">
+          <p style={{ margin: 0, color: "#4a5568", lineHeight: 1.5 }}>{description}</p>
+          {error && <span className="field-error">{error}</span>}
+        </div>
+        <div className="modal-footer">
+          <Button variant="ghost" disabled={busy} onClick={onCancel}>Cancel</Button>
+          <Button variant="danger" disabled={busy} onClick={handleConfirm}>
+            {busy ? "Deleting…" : <><Trash2 size={15} /> {confirmLabel}</>}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditSaleModal({
+  sale,
+  onClose,
+  onSave,
+}: {
+  sale: Sale;
+  onClose: () => void;
+  onSave: (updated: {
+    customerName: string;
+    contactNumber: string;
+    customerAddress: string;
+    invoiceDate: string;
+    products: ProductLine[];
+    subtotal: number;
+    discount: number;
+    tax: number;
+    finalAmount: number;
+  }) => Promise<void>;
+}) {
+  const [customerName, setCustomerName] = useState(sale.customerName);
+  const [contactNumber, setContactNumber] = useState(sale.contactNumber);
+  const [customerAddress, setCustomerAddress] = useState(sale.customerAddress || "");
+  const [invoiceDate, setInvoiceDate] = useState(sale.invoiceDate.slice(0, 10));
+  const [products, setProducts] = useState<ProductLine[]>(sale.products.map((p) => ({ ...p })));
+  const [discount, setDiscount] = useState(sale.discount || 0);
+  const [tax, setTax] = useState(sale.tax || 0);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const subtotal = products.reduce((sum, p) => sum + Math.max(0, p.quantity * p.rate - p.discount), 0);
+  const finalAmount = Math.max(0, subtotal - discount + tax);
+  const paid = paymentTotal(sale.payments);
+  const due = Math.max(0, finalAmount - paid);
+
+  const addProduct = () => {
+    setProducts((curr) => [
+      ...curr,
+      { id: newId(), category: "Electronics", brand: "", model: "", productName: "", imei: "", quantity: 1, rate: 0, discount: 0 },
+    ]);
+  };
+
+  const updateProduct = (id: string, key: keyof ProductLine, value: string | number) => {
+    setProducts((curr) => curr.map((p) => p.id === id ? { ...p, [key]: value } : p));
+  };
+
+  const removeProduct = (id: string) => {
+    if (products.length <= 1) return;
+    setProducts((curr) => curr.filter((p) => p.id !== id));
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!customerName.trim()) {
+      setError("Customer name is required.");
+      return;
+    }
+    if (!contactNumber.trim()) {
+      setError("Customer contact number is required.");
+      return;
+    }
+    if (products.length === 0) {
+      setError("At least one product is required.");
+      return;
+    }
+    for (const [i, p] of products.entries()) {
+      const cat = p.category ?? "Electronics";
+      if (cat === "Electronics") {
+        if (!p.brand.trim() || !p.model.trim()) {
+          setError(`Product ${i + 1}: Brand and Model are required.`);
+          return;
+        }
+      } else {
+        if (!p.productName?.trim()) {
+          setError(`Product ${i + 1}: Product name is required.`);
+          return;
+        }
+      }
+      if (p.discount > p.quantity * p.rate) {
+        setError(`Product ${i + 1}: Discount cannot exceed line amount.`);
+        return;
+      }
+    }
+
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({
+        customerName: customerName.trim(),
+        contactNumber: contactNumber.trim(),
+        customerAddress: customerAddress.trim(),
+        invoiceDate: businessDateTime(invoiceDate),
+        products: products.map((p) => ({
+          ...p,
+          category: p.category ?? "Electronics",
+          brand: (p.category ?? "Electronics") === "Electronics" ? p.brand.trim() : "",
+          model: (p.category ?? "Electronics") === "Electronics" ? p.model.trim() : "",
+          productName: (p.category ?? "Electronics") === "Accessories" ? p.productName?.trim() : undefined,
+          imei: p.imei?.trim() || "",
+        })),
+        subtotal,
+        discount,
+        tax,
+        finalAmount,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update invoice.");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (!saving && e.target === e.currentTarget) onClose(); }}>
+      <div className="modal-box" style={{ maxWidth: 680 }}>
+        <form onSubmit={handleSubmit}>
+          <div className="modal-header">
+            <div>
+              <span className="eyebrow">EDIT INVOICE · {sale.invoiceNumber}</span>
+              <h2>Edit sales details</h2>
+            </div>
+            <button className="icon-btn" type="button" disabled={saving} onClick={onClose} aria-label="Close">
+              <X size={18} />
+            </button>
+          </div>
+
+          <div style={{ padding: "16px 20px", display: "grid", gap: 16 }}>
+            <div className="panel detail-panel" style={{ padding: 14 }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
+              <div className="form-grid two-col">
+                <FormField label="Customer name">
+                  <input className="input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} required />
+                </FormField>
+                <FormField label="Contact number">
+                  <input className="input" inputMode="tel" value={contactNumber} onChange={(e) => setContactNumber(e.target.value)} required />
+                </FormField>
+                <FormField label="Customer address">
+                  <textarea className="input textarea" maxLength={500} value={customerAddress} onChange={(e) => setCustomerAddress(e.target.value)} placeholder="Street, area, city" />
+                </FormField>
+                <FormField label="Invoice date">
+                  <input className="input" type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} required />
+                </FormField>
+              </div>
+            </div>
+
+            <div className="panel detail-panel" style={{ padding: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Products</h3>
+                <Button variant="secondary" type="button" onClick={addProduct}><Plus size={14} /> Add product</Button>
+              </div>
+              <div className="product-list">
+                {products.map((p, idx) => (
+                  <div className="product-row" key={p.id}>
+                    <div className="product-row-title">
+                      <span>Item {String(idx + 1).padStart(2, "0")}</span>
+                      {products.length > 1 && (
+                        <button className="remove-link" type="button" onClick={() => removeProduct(p.id)}>
+                          <X size={14} /> Remove
+                        </button>
+                      )}
+                    </div>
+                    <div className="form-grid product-fields">
+                      <FormField label="Category">
+                        <div className="select-wrap category1-select-wrap">
+                          <select className="input" value={p.category ?? "Electronics"} onChange={(e) => {
+                            const cat = e.target.value as ProductCategory;
+                            setProducts(curr => curr.map(item => item.id === p.id ? { ...item, category: cat, brand: "", model: "", productName: "" } : item));
+                          }}>
+                            <option value="Electronics">Electronics</option>
+                            <option value="Accessories">Accessories</option>
+                          </select>
+                          <ChevronDown size={14} />
+                        </div>
+                      </FormField>
+                      {(p.category ?? "Electronics") === "Electronics" ? (
+                        <>
+                          <FormField label="Brand">
+                            <input className="input" placeholder="Brand" value={p.brand} onChange={(e) => updateProduct(p.id, "brand", e.target.value)} required />
+                          </FormField>
+                          <FormField label="Model">
+                            <input className="input" placeholder="Model" value={p.model} onChange={(e) => updateProduct(p.id, "model", e.target.value)} required />
+                          </FormField>
+                        </>
+                      ) : (
+                        <div className="product-span-2">
+                          <FormField label="Product name">
+                            <input className="input" placeholder="e.g. Charger, Case" value={p.productName ?? ""} onChange={(e) => updateProduct(p.id, "productName", e.target.value)} required />
+                          </FormField>
+                        </div>
+                      )}
+                      <FormField label="IMEI / Serial">
+                        <div className="imei-input-wrap"><input className="input" maxLength={20} placeholder="Optional" value={p.imei} onChange={(e) => updateProduct(p.id, "imei", e.target.value)} /><ScanBarcodeButton onScan={(value) => updateProduct(p.id, "imei", value)} /></div>
+                      </FormField>
+                      <FormField label="Qty">
+                        <input className="input" type="number" min="1" value={p.quantity} onChange={(e) => updateProduct(p.id, "quantity", Math.max(1, Number(e.target.value)))} required />
+                      </FormField>
+                      <FormField label="Rate (₹)">
+                        <input className="input" type="number" min="0" value={p.rate || ""} placeholder="0" onChange={(e) => updateProduct(p.id, "rate", Math.max(0, Number(e.target.value)))} required />
+                      </FormField>
+                      <FormField label="Discount (₹)">
+                        <input className="input" type="number" min="0" value={p.discount || ""} placeholder="0" onChange={(e) => updateProduct(p.id, "discount", Math.max(0, Number(e.target.value)))} />
+                      </FormField>
+                      <div className="line-total">
+                        <span>Line total</span>
+                        <strong>{money(Math.max(0, p.quantity * p.rate - p.discount))}</strong>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="panel detail-panel" style={{ padding: 14 }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Tax & discount</h3>
+              <div className="form-grid two-col">
+                <FormField label="Invoice discount (₹)">
+                  <input className="input" type="number" min="0" value={discount || ""} placeholder="0" onChange={(e) => setDiscount(Math.max(0, Number(e.target.value)))} />
+                </FormField>
+                <FormField label="Tax (₹)">
+                  <input className="input" type="number" min="0" value={tax || ""} placeholder="0" onChange={(e) => setTax(Math.max(0, Number(e.target.value)))} />
+                </FormField>
+              </div>
+            </div>
+
+            <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, display: "grid", gap: 6, fontSize: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}><span>Subtotal</span><strong>{money(subtotal)}</strong></div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}><span>Discount</span><strong>− {money(discount)}</strong></div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}><span>Tax</span><strong>{money(tax)}</strong></div>
+              <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px dashed #cbd5e1", paddingTop: 6, fontWeight: 700, fontSize: 15 }}>
+                <span>Total amount</span><strong>{money(finalAmount)}</strong>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", color: "#64748b" }}><span>Already paid</span><span>{money(paid)}</span></div>
+              <div style={{ display: "flex", justifyContent: "space-between", color: due > 0 ? "#c2410c" : "#15803d", fontWeight: 600 }}>
+                <span>Remaining balance</span><strong>{money(due)}</strong>
+              </div>
+            </div>
+
+            {error && <span className="field-error">{error}</span>}
+          </div>
+
+          <div className="modal-footer" style={{ padding: "12px 20px" }}>
+            <Button variant="ghost" type="button" disabled={saving} onClick={onClose}>Cancel</Button>
+            <Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} /> Save changes</>}</Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function EditServiceModal({
+  service,
+  vendors,
+  onClose,
+  onSave,
+}: {
+  service: ServiceJob;
+  vendors: ServiceVendor[];
+  onClose: () => void;
+  onSave: (updated: {
+    customerName: string;
+    contactNumber: string;
+    customerAddress: string;
+    inDate: string;
+    category?: ProductCategory;
+    brand: string;
+    mobileModel: string;
+    productName?: string;
+    imei: string;
+    reportedFault: string;
+    technicianNotes?: string;
+    receivedConditions?: string[];
+    remarks?: string;
+    serviceAmount: number;
+    discount: number;
+    finalAmount: number;
+    vendorId?: string;
+  }) => Promise<void>;
+}) {
+  const [customerName, setCustomerName] = useState(service.customerName);
+  const [contactNumber, setContactNumber] = useState(service.contactNumber);
+  const [customerAddress, setCustomerAddress] = useState(service.customerAddress || "");
+  const [inDate, setInDate] = useState(service.inDate.slice(0, 10));
+  const [category, setCategory] = useState<ProductCategory>(service.category ?? "Electronics");
+  const [brand, setBrand] = useState(service.brand || "");
+  const [mobileModel, setMobileModel] = useState(service.mobileModel || "");
+  const [productName, setProductName] = useState(service.productName || "");
+  const [imei, setImei] = useState(service.imei || "");
+  const [reportedFault, setReportedFault] = useState(service.reportedFault || "");
+  const [technicianNotes, setTechnicianNotes] = useState(service.technicianNotes || "");
+  const [conditions, setConditions] = useState<string[]>(service.receivedConditions || []);
+  const [otherCondition, setOtherCondition] = useState(() => {
+    const custom = (service.receivedConditions || []).find((c) => !CONDITIONS.includes(c) || c.startsWith("Other: "));
+    if (custom) return custom.replace(/^Other:\s*/, "");
+    return "";
+  });
+  const [remarks, setRemarks] = useState(service.remarks || "");
+  const [serviceAmount, setServiceAmount] = useState(service.serviceAmount || 0);
+  const [discount, setDiscount] = useState(service.discount || 0);
+  const [vendorId, setVendorId] = useState(service.vendorId || "");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const finalAmount = Math.max(0, serviceAmount - discount);
+
+  const toggleCondition = (item: string) => {
+    setConditions((curr) =>
+      curr.includes(item) ? curr.filter((c) => c !== item) : [...curr, item]
+    );
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!customerName.trim()) {
+      setError("Customer name is required.");
+      return;
+    }
+    if (!contactNumber.trim()) {
+      setError("Contact number is required.");
+      return;
+    }
+    if (category === "Electronics") {
+      if (!brand.trim()) {
+        setError("Brand is required.");
+        return;
+      }
+      if (!mobileModel.trim()) {
+        setError("Model is required.");
+        return;
+      }
+    } else {
+      if (!productName.trim()) {
+        setError("Product name is required.");
+        return;
+      }
+    }
+    if (!reportedFault.trim()) {
+      setError("Reported fault is required.");
+      return;
+    }
+
+    const finalConditions = conditions.filter((c) => c !== "Other" && !c.startsWith("Other: "));
+    if (conditions.includes("Other") && otherCondition.trim()) {
+      finalConditions.push(`Other: ${otherCondition.trim()}`);
+    }
+
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({
+        customerName: customerName.trim(),
+        contactNumber: contactNumber.trim(),
+        customerAddress: customerAddress.trim(),
+        inDate: businessDateTime(inDate),
+        category,
+        brand: category === "Electronics" ? brand.trim() : "",
+        mobileModel: category === "Electronics" ? mobileModel.trim() : "",
+        productName: category === "Accessories" ? productName.trim() : undefined,
+        imei: imei.trim(),
+        reportedFault: reportedFault.trim(),
+        technicianNotes: technicianNotes.trim(),
+        receivedConditions: finalConditions,
+        remarks: remarks.trim(),
+        serviceAmount,
+        discount,
+        finalAmount,
+        vendorId: vendorId || undefined,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update service job.");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (!saving && e.target === e.currentTarget) onClose(); }}>
+      <div className="modal-box" style={{ maxWidth: 650 }}>
+        <form onSubmit={handleSubmit}>
+          <div className="modal-header">
+            <div>
+              <span className="eyebrow">EDIT SERVICE · {service.serviceNumber}</span>
+              <h2>Edit service job details</h2>
+            </div>
+            <button className="icon-btn" type="button" disabled={saving} onClick={onClose} aria-label="Close">
+              <X size={18} />
+            </button>
+          </div>
+
+          <div style={{ padding: "16px 20px", display: "grid", gap: 14 }}>
+            <div className="panel detail-panel" style={{ padding: 14 }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
+              <div className="form-grid two-col">
+                <FormField label="Customer name">
+                  <input className="input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} required />
+                </FormField>
+                <FormField label="Contact number">
+                  <input className="input" inputMode="tel" value={contactNumber} onChange={(e) => setContactNumber(e.target.value)} required />
+                </FormField>
+                <FormField label="Customer address">
+                  <textarea className="input textarea" maxLength={500} value={customerAddress} onChange={(e) => setCustomerAddress(e.target.value)} placeholder="Street, area, city" />
+                </FormField>
+                <FormField label="Intake date">
+                  <input className="input" type="date" value={inDate} onChange={(e) => setInDate(e.target.value)} required />
+                </FormField>
+                <FormField label="Service vendor (optional)">
+                  <select className="input" value={vendorId} onChange={(e) => setVendorId(e.target.value)}>
+                    <option value="">No vendor (Shop repair)</option>
+                    {vendors.map((v) => (
+                      <option key={v.id} value={v.id}>{v.name} ({v.phone})</option>
+                    ))}
+                  </select>
+                </FormField>
+              </div>
+            </div>
+
+            <div className="panel detail-panel" style={{ padding: 14 }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Device & issue</h3>
+              <div className="form-grid two-col">
+                <FormField label="Category">
+                  <select className="input" value={category} onChange={(e) => setCategory(e.target.value as ProductCategory)}>
+                    <option value="Electronics">Electronics</option>
+                    <option value="Accessories">Accessories</option>
+                  </select>
+                </FormField>
+                {category === "Electronics" ? (
+                  <>
+                    <FormField label="Brand">
+                      <input className="input" placeholder="e.g. Samsung" value={brand} onChange={(e) => setBrand(e.target.value)} required />
+                    </FormField>
+                    <FormField label="Model">
+                      <input className="input" placeholder="e.g. Galaxy S23" value={mobileModel} onChange={(e) => setMobileModel(e.target.value)} required />
+                    </FormField>
+                  </>
+                ) : (
+                  <FormField label="Product name">
+                    <input className="input" placeholder="e.g. Earphones, Charger" value={productName} onChange={(e) => setProductName(e.target.value)} required />
+                  </FormField>
+                )}
+                <FormField label="IMEI / Serial">
+                  <div className="imei-input-wrap"><input className="input" maxLength={20} placeholder="Optional" value={imei} onChange={(e) => setImei(e.target.value)} /><ScanBarcodeButton onScan={setImei} /></div>
+                </FormField>
+              </div>
+
+              <div style={{ marginTop: 12 }}>
+                <FormField label="Reported fault">
+                  <textarea className="input textarea" value={reportedFault} onChange={(e) => setReportedFault(e.target.value)} rows={2} required />
+                </FormField>
+              </div>
+
+              <div style={{ marginTop: 12 }}>
+                <FormField label="Technician notes">
+                  <textarea className="input textarea" value={technicianNotes} onChange={(e) => setTechnicianNotes(e.target.value)} rows={2} />
+                </FormField>
+              </div>
+
+              <div style={{ marginTop: 12 }}>
+                <span className="field-label" style={{ marginBottom: 6 }}>Received condition</span>
+                <div className="condition-list">
+                  {CONDITIONS.map((cond) => {
+                    const checked = cond === "Other"
+                      ? conditions.includes("Other") || conditions.some((c) => c.startsWith("Other: "))
+                      : conditions.includes(cond);
+                    return (
+                      <button
+                        key={cond}
+                        type="button"
+                        className={`condition-chip ${checked ? "checked" : ""}`}
+                        onClick={() => toggleCondition(cond)}
+                      >
+                        <span>{checked ? <Check size={11} strokeWidth={3} /> : null}</span>
+                        {cond}
+                      </button>
+                    );
+                  })}
+                </div>
+                {(conditions.includes("Other") || conditions.some((c) => c.startsWith("Other: "))) && (
+                  <div style={{ marginTop: 8 }}>
+                    <input
+                      className="input"
+                      placeholder="Specify other received condition"
+                      value={otherCondition}
+                      onChange={(e) => setOtherCondition(e.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginTop: 12 }}>
+                <FormField label="Additional remarks">
+                  <input className="input" value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Optional" />
+                </FormField>
+              </div>
+            </div>
+
+            <div className="panel detail-panel" style={{ padding: 14 }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Service charges</h3>
+              <div className="form-grid two-col">
+                <FormField label="Service amount (₹)">
+                  <input className="input" type="number" min="0" value={serviceAmount || ""} placeholder="0" onChange={(e) => setServiceAmount(Math.max(0, Number(e.target.value)))} required />
+                </FormField>
+                <FormField label="Discount (₹)">
+                  <input className="input" type="number" min="0" value={discount || ""} placeholder="0" onChange={(e) => setDiscount(Math.max(0, Number(e.target.value)))} />
+                </FormField>
+              </div>
+              <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", fontWeight: 600, fontSize: 15 }}>
+                <span>Final amount:</span>
+                <strong>{money(finalAmount)}</strong>
+              </div>
+            </div>
+
+            {error && <span className="field-error">{error}</span>}
+          </div>
+
+          <div className="modal-footer" style={{ padding: "12px 20px" }}>
+            <Button variant="ghost" type="button" disabled={saving} onClick={onClose}>Cancel</Button>
+            <Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} /> Save changes</>}</Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 }
 
 function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canViewServices }: {

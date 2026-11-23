@@ -34,6 +34,7 @@ const commonSchema = {
   customerId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
   customerName: z.string().trim().min(2).max(120),
   contactNumber: z.string().trim().min(7).max(20),
+  customerAddress: z.string().trim().max(500).optional().default(""),
   createdAt: z.string().datetime(),
   payments: z.array(paymentSchema).max(100),
 };
@@ -66,6 +67,7 @@ const serviceSchema = z.object({
   status: z.literal("Received"),
   serviceAmount: z.number().finite().min(0),
   discount: z.number().finite().min(0),
+  tax: z.number().finite().min(0).optional(),
   finalAmount: z.number().finite().min(0),
   readyAt: z.string().datetime().optional(),
   deliveryOutDate: z.string().datetime().optional(),
@@ -82,6 +84,44 @@ const createSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("sales"), prefix: z.string().regex(/^[A-Z0-9]{2,6}$/), record: saleSchema }).strict(),
   z.object({ kind: z.literal("services"), prefix: z.string().regex(/^[A-Z0-9]{2,6}$/), record: serviceSchema }).strict(),
 ]);
+
+const saleEditSchema = z.object({
+  customerName: z.string().trim().min(2).max(120),
+  contactNumber: z.string().trim().min(7).max(20),
+  customerAddress: z.string().trim().max(500).optional().default(""),
+  invoiceDate: z.string().datetime(),
+  products: z.array(productSchema).min(1).max(80),
+  subtotal: z.number().finite().min(0),
+  discount: z.number().finite().min(0),
+  tax: z.number().finite().min(0),
+  finalAmount: z.number().finite().min(0),
+}).strict();
+
+const serviceEditSchema = z.object({
+  customerName: z.string().trim().min(2).max(120),
+  contactNumber: z.string().trim().min(7).max(20),
+  customerAddress: z.string().trim().max(500).optional().default(""),
+  inDate: z.string().datetime(),
+  category: z.enum(["Electronics", "Accessories"]).optional(),
+  brand: z.string().trim().max(80),
+  mobileModel: z.string().trim().max(120),
+  productName: z.string().trim().max(200).optional(),
+  imei: z.string().trim().max(20),
+  reportedFault: z.string().trim().min(1).max(2000),
+  technicianNotes: z.string().max(4000).optional().default(""),
+  receivedConditions: z.array(z.string().max(80)).max(12).optional().default([]),
+  remarks: z.string().max(2000).optional().default(""),
+  serviceAmount: z.number().finite().min(0),
+  discount: z.number().finite().min(0),
+  tax: z.number().finite().min(0).optional(),
+  finalAmount: z.number().finite().min(0),
+  vendorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
+}).strict().refine((svc) => {
+  const cat = svc.category ?? "Electronics";
+  if (cat === "Electronics") return !!(svc.brand && svc.mobileModel);
+  if (cat === "Accessories") return !!(svc.productName);
+  return true;
+}, { message: "Electronics require brand and model; Accessories require a product name." });
 
 const patchSchema = z.discriminatedUnion("action", [
   z.object({
@@ -106,7 +146,22 @@ const patchSchema = z.discriminatedUnion("action", [
     recordId: z.string().uuid(),
     vendorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).nullable(),
   }).strict(),
+  z.object({
+    action: z.literal("edit-sale"),
+    recordId: z.string().uuid(),
+    record: saleEditSchema,
+  }).strict(),
+  z.object({
+    action: z.literal("edit-service"),
+    recordId: z.string().uuid(),
+    record: serviceEditSchema,
+  }).strict(),
 ]);
+
+const deleteSchema = z.object({
+  kind: z.enum(["sales", "services"]),
+  recordId: z.string().uuid(),
+}).strict();
 
 function responseError(message: string, status: number) {
   return Response.json({ error: message }, { status });
@@ -162,7 +217,7 @@ export async function POST(request: Request) {
     }).format(new Date()));
     const total = kind === "sales"
       ? rounded(record.products.reduce((sum, product) => sum + product.quantity * product.rate - product.discount, 0) - record.discount + record.tax)
-      : rounded(record.serviceAmount - record.discount);
+      : rounded(record.serviceAmount - record.discount + (record.tax ?? 0));
     if (kind === "sales" && record.discount > record.products.reduce((sum, product) => sum + product.quantity * product.rate - product.discount, 0)) {
       return responseError("Invoice discount cannot exceed the product subtotal.", 400);
     }
@@ -219,6 +274,7 @@ export async function POST(request: Request) {
           name: record.customerName,
           phone: record.contactNumber,
           email: "",
+          address: record.customerAddress ?? "",
           createdAt: record.createdAt,
         });
       }
@@ -314,16 +370,101 @@ export async function PATCH(request: Request) {
   if (!parsed.success) return responseError(parsed.error.issues[0]?.message ?? "The update data is invalid.", 400);
   const canEditRecord = parsed.data.action === "payment"
     ? actorHasAccess(actor, parsed.data.kind, "edit")
-    : parsed.data.action === "service-status"
-      ? actorHasAccess(actor, "services", "edit")
-        || (parsed.data.status === "Returned" && actorHasAccess(actor, "ready", "edit"))
-      : actorHasAccess(actor, "services", "edit");
+    : parsed.data.action === "edit-sale"
+      ? actorHasAccess(actor, "sales", "edit")
+      : parsed.data.action === "service-status"
+        ? actorHasAccess(actor, "services", "edit")
+          || (parsed.data.status === "Returned" && actorHasAccess(actor, "ready", "edit"))
+        : actorHasAccess(actor, "services", "edit");
   if (!canEditRecord) return responseError("You do not have edit access to this module.", 403);
 
   try {
     const uid = actor.shopId;
     const db = adminDatabase();
     const update = parsed.data;
+    if (update.action === "edit-sale") {
+      const recordRef = db.doc(`shops/${uid}/sales/${update.recordId}`);
+      await db.runTransaction(async (transaction) => {
+        const snapshot = await transaction.get(recordRef);
+        if (!snapshot.exists) throw new Error("RECORD_NOT_FOUND");
+        const current = snapshot.data()!;
+        const payments = Array.isArray(current.payments) ? current.payments as Array<{ amount: number }> : [];
+        const paid = sumPayments(payments);
+        const subtotal = rounded(update.record.products.reduce((sum, p) => sum + p.quantity * p.rate - p.discount, 0));
+        const total = rounded(subtotal - update.record.discount + update.record.tax);
+
+        transaction.update(recordRef, {
+          customerName: update.record.customerName,
+          contactNumber: update.record.contactNumber,
+          customerAddress: update.record.customerAddress ?? "",
+          invoiceDate: update.record.invoiceDate,
+          products: update.record.products,
+          subtotal,
+          discount: update.record.discount,
+          tax: update.record.tax,
+          finalAmount: total,
+          paymentStatus: paymentStatus(total, paid),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+
+        transaction.create(db.doc(`shops/${uid}/activityLogs/${randomUUID()}`), {
+          type: "SALE_UPDATED",
+          relatedType: "SALE",
+          relatedDocumentId: update.recordId,
+          customerName: update.record.customerName,
+          createdAt: FieldValue.serverTimestamp(),
+          createdBy: actor.uid,
+        });
+      });
+      return Response.json({ success: true });
+    }
+
+    if (update.action === "edit-service") {
+      const recordRef = db.doc(`shops/${uid}/services/${update.recordId}`);
+      const vendorRef = update.record.vendorId ? db.doc(`shops/${uid}/vendors/${update.record.vendorId}`) : undefined;
+      await db.runTransaction(async (transaction) => {
+        const snapshot = await transaction.get(recordRef);
+        if (!snapshot.exists) throw new Error("RECORD_NOT_FOUND");
+        const vendorSnapshot = vendorRef ? await transaction.get(vendorRef) : undefined;
+        if (vendorRef && !vendorSnapshot?.exists) throw new Error("VENDOR_NOT_FOUND");
+        if (vendorSnapshot?.data()?.deleting === true) throw new Error("VENDOR_DELETING");
+
+        const total = rounded(update.record.serviceAmount - update.record.discount + (update.record.tax ?? 0));
+
+        transaction.update(recordRef, {
+          customerName: update.record.customerName,
+          contactNumber: update.record.contactNumber,
+          customerAddress: update.record.customerAddress ?? "",
+          inDate: update.record.inDate,
+          category: update.record.category ?? "Electronics",
+          brand: update.record.brand,
+          mobileModel: update.record.mobileModel,
+          productName: update.record.productName ?? "",
+          imei: update.record.imei,
+          reportedFault: update.record.reportedFault,
+          technicianNotes: update.record.technicianNotes ?? "",
+          receivedConditions: update.record.receivedConditions ?? [],
+          remarks: update.record.remarks ?? "",
+          serviceAmount: update.record.serviceAmount,
+          discount: update.record.discount,
+          tax: update.record.tax ?? 0,
+          finalAmount: total,
+          vendorId: update.record.vendorId || FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+
+        transaction.create(db.doc(`shops/${uid}/activityLogs/${randomUUID()}`), {
+          type: "SERVICE_UPDATED",
+          relatedType: "SERVICE",
+          relatedDocumentId: update.recordId,
+          customerName: update.record.customerName,
+          createdAt: FieldValue.serverTimestamp(),
+          createdBy: actor.uid,
+        });
+      });
+      return Response.json({ success: true });
+    }
+
     if (update.action === "payment") {
       const payment = { ...update.payment, id: update.payment.id || randomUUID(), date: new Date().toISOString() };
       const recordRef = db.doc(`shops/${uid}/${update.kind}/${update.recordId}`);
@@ -459,5 +600,57 @@ export async function PATCH(request: Request) {
     if (message === "VENDOR_DELETING") return responseError("This service vendor is being deleted. Select another vendor.", 409);
     console.error("Trusted record update failed.", error);
     return responseError("The record could not be updated. Check Firebase Admin setup and try again.", 500);
+  }
+}
+
+export async function DELETE(request: Request) {
+  let actor;
+  try { actor = await authenticatedActor(request); }
+  catch { return responseError("Server-side Firebase Admin credentials are not configured.", 503); }
+  if (!actor) return responseError("Sign in is required.", 401);
+
+  let raw: unknown;
+  try { raw = await request.json(); }
+  catch { return responseError("Request body must be valid JSON.", 400); }
+  const parsed = deleteSchema.safeParse(raw);
+  if (!parsed.success) return responseError(parsed.error.issues[0]?.message ?? "Invalid delete request.", 400);
+  if (!actorHasAccess(actor, parsed.data.kind, "edit")) return responseError("You do not have edit access to this module.", 403);
+
+  try {
+    const uid = actor.shopId;
+    const db = adminDatabase();
+    const { kind, recordId } = parsed.data;
+    const recordRef = db.doc(`shops/${uid}/${kind}/${recordId}`);
+
+    await db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(recordRef);
+      if (!snapshot.exists) throw new Error("RECORD_NOT_FOUND");
+      const record = snapshot.data()!;
+
+      const payments = Array.isArray(record.payments) ? record.payments as Array<{ id?: string }> : [];
+      for (const payment of payments) {
+        if (payment.id) {
+          transaction.delete(db.doc(`shops/${uid}/payments/${payment.id}`));
+        }
+      }
+
+      transaction.delete(recordRef);
+      transaction.create(db.doc(`shops/${uid}/activityLogs/${randomUUID()}`), {
+        type: kind === "sales" ? "SALE_DELETED" : "SERVICE_DELETED",
+        relatedType: kind === "sales" ? "SALE" : "SERVICE",
+        relatedDocumentId: recordId,
+        customerName: record.customerName || "",
+        createdAt: FieldValue.serverTimestamp(),
+        createdBy: actor.uid,
+      });
+    });
+
+    return Response.json({ success: true });
+  } catch (error) {
+    if (error instanceof Error && error.message === "RECORD_NOT_FOUND") {
+      return responseError("That record could not be found.", 404);
+    }
+    console.error("Trusted record deletion failed.", error);
+    return responseError("The record could not be deleted.", 500);
   }
 }

@@ -7,6 +7,7 @@ const vendorServiceSchema = z.object({
   serviceNumber: z.string().trim().min(1).max(120),
   inDate: z.string().datetime(),
   customerName: z.string().trim().min(2).max(120),
+  customerAddress: z.string().trim().max(500).optional().default(""),
   brand: z.string().trim().min(1).max(80),
   mobileModel: z.string().trim().min(1).max(120),
   customerNumber: z.string().trim().min(7).max(20),
@@ -17,24 +18,35 @@ const vendorServiceSchema = z.object({
   deliveryDate: z.string().datetime().optional(),
   deliveryCustomer: z.string().trim().max(120).optional(),
   serviceCharge: z.number().finite().min(0),
+  tax: z.number().finite().min(0).optional(),
 }).strict().transform((value) => value.returnOutcome === "Not repaired"
-  ? { ...value, status: "Returned" as const, serviceCharge: 0 }
+  ? { ...value, status: "Returned" as const, serviceCharge: 0, tax: 0 }
   : value);
 
 const vendorServiceUpdateSchema = z.object({
   serviceId: z.string().uuid(),
+  customerName: z.string().trim().min(2).max(120).optional(),
+  customerAddress: z.string().trim().max(500).optional(),
+  customerNumber: z.string().trim().min(7).max(20).optional(),
+  brand: z.string().trim().min(1).max(80).optional(),
+  mobileModel: z.string().trim().min(1).max(120).optional(),
+  receivedCondition: z.string().trim().min(1).max(200).optional(),
+  fault: z.string().trim().max(1000).optional(),
+  serviceNumber: z.string().trim().min(1).max(120).optional(),
+  inDate: z.string().datetime().optional(),
   status: z.enum(["Received", "In progress", "Ready", "Returned"]).optional(),
   returnOutcome: z.enum(["Not repaired"]).optional(),
   deliveryDate: z.string().datetime().optional(),
   deliveryCustomer: z.string().trim().max(120).optional(),
   serviceCharge: z.number().finite().min(0).optional(),
-}).strict().refine((value) => value.status !== undefined
-  || value.returnOutcome !== undefined
-  || value.deliveryDate !== undefined
-  || value.deliveryCustomer !== undefined
-  || value.serviceCharge !== undefined, {
+  tax: z.number().finite().min(0).optional(),
+}).strict().refine((value) => Object.keys(value).length > 1, {
   message: "Provide at least one vendor service update.",
 });
+
+const vendorServiceDeleteSchema = z.object({
+  serviceId: z.string().uuid(),
+}).strict();
 
 function responseError(message: string, status: number) {
   return Response.json({ error: message }, { status });
@@ -109,12 +121,9 @@ export async function PATCH(request: Request) {
     const snapshot = await ref.get();
     if (!snapshot.exists) return responseError("Vendor service not found.", 404);
     const isRefund = parsed.data.returnOutcome === "Not repaired";
-    const changes = {
-      ...(parsed.data.status !== undefined ? { status: parsed.data.status } : {}),
-      ...(parsed.data.returnOutcome !== undefined ? { returnOutcome: parsed.data.returnOutcome } : {}),
-      ...(parsed.data.deliveryDate !== undefined ? { deliveryDate: parsed.data.deliveryDate } : {}),
-      ...(parsed.data.deliveryCustomer !== undefined ? { deliveryCustomer: parsed.data.deliveryCustomer } : {}),
-      ...(parsed.data.serviceCharge !== undefined ? { serviceCharge: parsed.data.serviceCharge } : {}),
+    const { serviceId, ...rest } = parsed.data;
+    const changes: Record<string, unknown> = {
+      ...rest,
       ...(isRefund ? { status: "Returned" as const, serviceCharge: 0 } : {}),
     };
     await ref.update({ ...changes, updatedAt: new Date().toISOString() });
@@ -122,5 +131,28 @@ export async function PATCH(request: Request) {
   } catch (reason) {
     console.error("Vendor service update failed.", reason);
     return responseError("The vendor service could not be updated.", 500);
+  }
+}
+
+export async function DELETE(request: Request) {
+  let actor;
+  try { actor = await authenticatedActor(request); }
+  catch { return responseError("Firebase Admin credentials are not configured.", 503); }
+  if (!actor) return responseError("Sign in is required.", 401);
+  if (!actorHasAccess(actor, "vendors", "edit")) return responseError("You do not have edit access to vendor services.", 403);
+  let raw: unknown;
+  try { raw = await request.json(); }
+  catch { return responseError("Request body must be valid JSON.", 400); }
+  const parsed = vendorServiceDeleteSchema.safeParse(raw);
+  if (!parsed.success) return responseError(parsed.error.issues[0]?.message ?? "Invalid delete request.", 400);
+  try {
+    const ref = adminDatabase().doc(`shops/${actor.shopId}/vendorServices/${parsed.data.serviceId}`);
+    const snapshot = await ref.get();
+    if (!snapshot.exists) return responseError("Vendor service not found.", 404);
+    await ref.delete();
+    return Response.json({ success: true });
+  } catch (reason) {
+    console.error("Vendor service delete failed.", reason);
+    return responseError("The vendor service could not be deleted.", 500);
   }
 }
