@@ -87,12 +87,13 @@ function addInvoiceMoney(pdf: jsPDF, value: number, x: number, y: number, symbol
   const amount = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 })
     .format(Math.abs(Number.isFinite(value) ? value : 0));
   const sign = value < 0 ? "- " : "";
-  const symbolWidth = 2.8;
+  const symbolWidth = 4.2;
+  const symbolHeight = 4.5;
   const gap = 0.5;
   const amountWidth = pdf.getTextWidth(amount);
   const startX = x - pdf.getTextWidth(sign) - symbolWidth - gap - amountWidth;
   pdf.text(sign, startX, y);
-  pdf.addImage(symbolImage, "PNG", startX + pdf.getTextWidth(sign), y - 2.7, symbolWidth, 2.8);
+  pdf.addImage(symbolImage, "PNG", startX + pdf.getTextWidth(sign), y - 3.7, symbolWidth, symbolHeight);
   pdf.text(amount, startX + pdf.getTextWidth(sign) + symbolWidth + gap, y);
 }
 
@@ -2613,8 +2614,8 @@ function InvoicePreview({ sale, settings }: { sale: Sale; settings: ShopSettings
       <colgroup><col style={{ width: "23%" }} /><col style={{ width: "23%" }} /><col style={{ width: "8%" }} /><col style={{ width: "14%" }} /><col style={{ width: "15%" }} /><col style={{ width: "17%" }} /></colgroup>
       <thead><tr><th scope="col">ITEM</th><th scope="col">IMEI / SERIAL</th><th scope="col">QTY</th><th scope="col">RATE</th><th scope="col">DISCOUNT</th><th scope="col">AMOUNT</th></tr></thead>
       <tbody>{sale.products.map((product) => <tr key={product.id}>
-        <td><strong>{deviceLabel(product)}</strong></td><td>{product.imei || "—"}</td><td>{product.quantity}</td>
-        <td>{money(product.rate)}</td><td>{money(product.discount)}</td><td><strong>{money(product.quantity * product.rate - product.discount)}</strong></td>
+        <td data-label="Item"><strong>{deviceLabel(product)}</strong></td><td data-label="IMEI / Serial">{product.imei || "—"}</td><td data-label="Qty">{product.quantity}</td>
+        <td data-label="Rate">{money(product.rate)}</td><td data-label="Discount">{money(product.discount)}</td><td data-label="Amount"><strong>{money(product.quantity * product.rate - product.discount)}</strong></td>
       </tr>)}</tbody>
     </table></div>
     <div className="invoice-totals"><span>Subtotal <strong>{money(sale.subtotal)}</strong></span><span>Discount <strong>− {money(sale.discount)}</strong></span><span>Tax <strong>{money(sale.tax)}</strong></span><span className="invoice-grand">Invoice total <strong>{money(sale.finalAmount)}</strong></span><span>Paid <strong>{money(paymentTotal(sale.payments))}</strong></span><span>Balance due <strong>{money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></span></div>
@@ -2697,7 +2698,7 @@ async function downloadInvoice(sale: Sale, settings: ShopSettings) {
   y += 8; pdf.setDrawColor(0, 0, 0); pdf.line(117, y - 4, 194, y - 4);
   const totals: [string, number][] = [["Subtotal", sale.subtotal], ["Discount", -sale.discount], ["Tax", sale.tax], ["Invoice total", sale.finalAmount], ["Paid", paymentTotal(sale.payments)], ["Balance due", Math.max(0, sale.finalAmount - paymentTotal(sale.payments))]];
   pdf.setFontSize(9); totals.forEach(([label, amount], index) => { if (index === 3) pdf.setFont("helvetica", "bold"); else if (index > 3) pdf.setFont("helvetica", "normal"); pdf.text(label, 119, y); addInvoiceMoney(pdf, amount, 192, y, rupeeSymbol); y += 7; });
-  y += 14; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8); pdf.text((settings.invoiceFooter || "Thank you for your business.").slice(0, 100), 16, y);
+  y += 14; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8); pdf.text((settings.invoiceFooter || "Thank you for your business.").slice(0, 100), 105, y, { align: "center" });
   y += 20; pdf.setDrawColor(180, 185, 195); pdf.line(16, y, 80, y); pdf.line(130, y, 194, y); pdf.text("Customer signature", 16, y + 6); pdf.text("Authorized signature", 130, y + 6);
   pdf.save(`${sale.invoiceNumber}.pdf`);
 }
@@ -2717,7 +2718,7 @@ function printInvoice(sale: Sale, settings: ShopSettings) {
   const logoBackground = settings.logoDataUrl ? "#fff" : "#000";
   const logo = `<img class="shop-logo" style="background:${logoBackground}" src="${escapeHtml(settings.logoDataUrl || BRAND_LOGO_PATH)}" alt="AH Mobiles">`;
   const gstin = settings.gstin ? `<div class="muted">GSTIN: ${escapeHtml(settings.gstin)}</div>` : "";
-  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:13px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #000}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:120px;height:80px;object-fit:contain;background:#000;border-radius:4px}.muted{color:#666;font-size:12px}table{width:100%;border:1px solid #000;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #000;padding:7px 5px}th:not(:last-child),td:not(:last-child){border-right:1px solid #000}th{font-size:10px;color:#111}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #000;padding-top:10px}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}${sale.customerAddress ? `<br>${escapeHtml(sale.customerAddress)}` : ""}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p>${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
+  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:13px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #000}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:120px;height:80px;object-fit:contain;background:#000;border-radius:4px}.muted{color:#666;font-size:12px}table{width:100%;border:1px solid #000;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #000;padding:7px 5px}th:not(:last-child),td:not(:last-child){border-right:1px solid #000}th{font-size:10px;color:#111}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #000;padding-top:10px}.footer-note{text-align:center;margin:14px 0}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}${sale.customerAddress ? `<br>${escapeHtml(sale.customerAddress)}` : ""}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p class="footer-note">${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
   popup.document.close();
 }
 
@@ -2798,7 +2799,7 @@ function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceT
     .payments-box { margin-top: 14px; padding: 10px; background: #fafbfc; border-radius: 6px; border: 1px solid #edf0f5; }
     .payments-title { font-weight: bold; font-size: 11px; color: #555; margin-bottom: 6px; }
     .pay-line { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
-    .footer-note { margin-top: 24px; color: #555; font-size: 12px; }
+    .footer-note { margin-top: 24px; color: #555; font-size: 12px; text-align: center; }
     .sign { display: flex; justify-content: space-between; margin-top: 48px; color: #444; }
     @media print { @page { size: A4; margin: 16mm; } body { padding: 0; } }
   `;
