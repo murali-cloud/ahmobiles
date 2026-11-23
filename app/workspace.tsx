@@ -69,6 +69,33 @@ function pdfMoney(value: number): string {
   return money(value).replace("₹", "INR").replace(/\u00a0/g, " ");
 }
 
+function createRupeeSymbolImage(): string | null {
+  const canvas = document.createElement("canvas");
+  canvas.width = 96;
+  canvas.height = 96;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.fillStyle = "#000";
+  context.font = "72px sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText("₹", 48, 50);
+  return canvas.toDataURL("image/png");
+}
+
+function addInvoiceMoney(pdf: jsPDF, value: number, x: number, y: number, symbolImage: string) {
+  const amount = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 })
+    .format(Math.abs(Number.isFinite(value) ? value : 0));
+  const sign = value < 0 ? "- " : "";
+  const symbolWidth = 2.8;
+  const gap = 0.5;
+  const amountWidth = pdf.getTextWidth(amount);
+  const startX = x - pdf.getTextWidth(sign) - symbolWidth - gap - amountWidth;
+  pdf.text(sign, startX, y);
+  pdf.addImage(symbolImage, "PNG", startX + pdf.getTextWidth(sign), y - 2.7, symbolWidth, 2.8);
+  pdf.text(amount, startX + pdf.getTextWidth(sign) + symbolWidth + gap, y);
+}
+
 function dateInputValue(date = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
@@ -2624,6 +2651,11 @@ async function downloadInvoice(sale: Sale, settings: ShopSettings) {
     window.alert(reason instanceof Error ? reason.message : "Could not load the invoice logo.");
     return;
   }
+  const rupeeSymbol = createRupeeSymbolImage();
+  if (!rupeeSymbol) {
+    window.alert("Could not prepare the rupee symbol for the invoice.");
+    return;
+  }
   const pdf = new jsPDF();
   const shopTextX = 72;
   const logoFormat = logoData.startsWith("data:image/png") ? "PNG" : "JPEG";
@@ -2655,16 +2687,16 @@ async function downloadInvoice(sale: Sale, settings: ShopSettings) {
     pdf.text(deviceLabel(product).slice(0, 27), 18, y);
     pdf.text(product.imei || "—", 74, y);
     pdf.text(String(product.quantity), 126, y, { align: "right" });
-    pdf.text(pdfMoney(product.rate), 150, y, { align: "right" });
-    pdf.text(pdfMoney(product.discount), 174, y, { align: "right" });
-    pdf.text(pdfMoney(product.quantity * product.rate - product.discount), 192, y, { align: "right" });
+    addInvoiceMoney(pdf, product.rate, 150, y, rupeeSymbol);
+    addInvoiceMoney(pdf, product.discount, 174, y, rupeeSymbol);
+    addInvoiceMoney(pdf, product.quantity * product.rate - product.discount, 192, y, rupeeSymbol);
     y += 9;
     pdf.setDrawColor(0, 0, 0); pdf.rect(16, rowTop, 178, y - 3 - rowTop, "S");
     columnDividers.forEach((x) => pdf.line(x, rowTop, x, y - 3));
   });
   y += 8; pdf.setDrawColor(0, 0, 0); pdf.line(117, y - 4, 194, y - 4);
-  const totals: [string, string][] = [["Subtotal", pdfMoney(sale.subtotal)], ["Discount", `- ${pdfMoney(sale.discount)}`], ["Tax", pdfMoney(sale.tax)], ["Invoice total", pdfMoney(sale.finalAmount)], ["Paid", pdfMoney(paymentTotal(sale.payments))], ["Balance due", pdfMoney(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))]];
-  pdf.setFontSize(9); totals.forEach(([label, amount], index) => { if (index === 3) pdf.setFont("helvetica", "bold"); else if (index > 3) pdf.setFont("helvetica", "normal"); pdf.text(label, 119, y); pdf.text(amount, 192, y, { align: "right" }); y += 7; });
+  const totals: [string, number][] = [["Subtotal", sale.subtotal], ["Discount", -sale.discount], ["Tax", sale.tax], ["Invoice total", sale.finalAmount], ["Paid", paymentTotal(sale.payments)], ["Balance due", Math.max(0, sale.finalAmount - paymentTotal(sale.payments))]];
+  pdf.setFontSize(9); totals.forEach(([label, amount], index) => { if (index === 3) pdf.setFont("helvetica", "bold"); else if (index > 3) pdf.setFont("helvetica", "normal"); pdf.text(label, 119, y); addInvoiceMoney(pdf, amount, 192, y, rupeeSymbol); y += 7; });
   y += 14; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8); pdf.text((settings.invoiceFooter || "Thank you for your business.").slice(0, 100), 16, y);
   y += 20; pdf.setDrawColor(180, 185, 195); pdf.line(16, y, 80, y); pdf.line(130, y, 194, y); pdf.text("Customer signature", 16, y + 6); pdf.text("Authorized signature", 130, y + 6);
   pdf.save(`${sale.invoiceNumber}.pdf`);
