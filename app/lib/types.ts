@@ -39,7 +39,7 @@ export type ServiceJob = {
   deliveryHistory?: Array<{ date: string; person: string; staff?: string; staffId?: string; remarks: string }>;
   createdAt: string;
 };
-export type ShopSettings = { shopName: string; ownerName: string; phone: string; email: string; address: string; gstin: string; logoDataUrl?: string; invoicePaperSize: "A4" | "Thermal"; invoiceFooter: string; salesPrefix: string; servicePrefix: string; enableTax?: boolean };
+export type ShopSettings = { shopName: string; ownerName: string; phone: string; email: string; address: string; gstin: string; logoDataUrl?: string; invoicePaperSize: "A4" | "Thermal"; invoiceFooter: string; salesPrefix: string; servicePrefix: string; enableTax?: boolean; taxRate?: number };
 export type WorkspaceData = { sales: Sale[]; services: ServiceJob[]; customers: Customer[]; vendors: ServiceVendor[]; vendorServices: VendorService[]; settings: ShopSettings };
-export const DEFAULT_SETTINGS: ShopSettings = { shopName: "AHMobiles", ownerName: "Shop owner", phone: "", email: "", address: "", gstin: "", invoicePaperSize: "A4", invoiceFooter: "Thank you for choosing AHMobiles.", salesPrefix: "SAL", servicePrefix: "SERV", enableTax: true };
+export const DEFAULT_SETTINGS: ShopSettings = { shopName: "AHMobiles", ownerName: "Shop owner", phone: "", email: "", address: "", gstin: "", invoicePaperSize: "A4", invoiceFooter: "Thank you for choosing AHMobiles.", salesPrefix: "SAL", servicePrefix: "SERV", enableTax: false, taxRate: 18 };
 export const EMPTY_WORKSPACE: WorkspaceData = { sales: [], services: [], customers: [], vendors: [], vendorServices: [], settings: DEFAULT_SETTINGS };

@@ -1903,8 +1903,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
   data: WorkspaceData; busy: boolean; onSubmit: (draft: Omit<Sale, "id">) => Promise<Sale | undefined>; onCancel: () => void;
 }) {
   const [products, setProducts] = useState<ProductLine[]>([{ id: newId(), category: "Electronics", brand: "", model: "", productName: "", imei: "", quantity: 1, rate: 0, discount: 0 }]);
-  const [enableTax, setEnableTax] = useState(data.settings.enableTax !== false);
-  const [tax, setTax] = useState(0);
+  const [enableTax, setEnableTax] = useState(false);
   const [paid, setPaid] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState(false);
@@ -1919,6 +1918,8 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
   const invoiceDate = useWatch({ control, name: "invoiceDate" });
   const invoiceNumber = useWatch({ control, name: "invoiceNumber" });
   const total = products.reduce((sum, product) => sum + Math.max(0, product.quantity * product.rate - product.discount), 0);
+  const taxRate = enableTax ? Math.max(0, data.settings.taxRate ?? 18) : 0;
+  const tax = Math.round((total * taxRate / 100 + Number.EPSILON) * 100) / 100;
   const final = Math.max(0, total + (enableTax ? tax : 0));
   const normalizedPhone = normalizePhoneNumber(phone ?? "");
   const matchingCustomer = data.customers.find((customer) =>
@@ -2024,7 +2025,6 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
               <label className="checkbox-wrap" style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontWeight: 500, fontSize: 13 }}>
                 <input type="checkbox" checked={enableTax} onChange={(event) => {
                   setEnableTax(event.target.checked);
-                  if (!event.target.checked) setTax(0);
                 }} />
                 <span>Enable tax</span>
               </label>
@@ -2032,7 +2032,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
           </div>
           <div className="form-grid two-col">
             <FormField label="Amount paid (₹)" error={fieldErrors.amountPaid}><input className="input" type="number" min="0" value={paid || ""} placeholder="0" onChange={(event) => setPaid(Number(event.target.value))} /></FormField>
-            {enableTax && <FormField label="Tax (₹)"><input className="input" type="number" min="0" value={tax || ""} placeholder="0" onChange={(event) => setTax(Number(event.target.value))} /></FormField>}
+            {enableTax && <FormField label={`Tax (${taxRate}% GST)`}><input className="input" type="number" value={tax} readOnly /></FormField>}
           </div>
         </section>
         <div className="form-footer"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="secondary" onClick={() => setPreview(true)}><FileText size={15} /> Preview invoice</Button><Button variant="secondary" onClick={() => void submitAndPrint()} disabled={busy}><Printer size={15} /> Save & print</Button><Button type="submit" disabled={busy}>{busy ? "Saving…" : <><Check size={16} /> Save sales bill</>}</Button></div>
@@ -2086,8 +2086,10 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
     resolver: zodResolver(serviceFormSchema),
     defaultValues: { customerName: "", contactNumber: "", customerAddress: "", inDate: dateInputValue(), brand: "", mobileModel: "", imei: "", reportedFault: "", technicianNotes: "", remarks: "", serviceAmount: 0, discount: 0 },
   });
-  const final = amount;
-  const balance = Math.max(0, amount - advance);
+  const serviceTaxRate = settings.enableTax === true ? Math.max(0, settings.taxRate ?? 18) : 0;
+  const tax = Math.round((amount * serviceTaxRate / 100 + Number.EPSILON) * 100) / 100;
+  const final = amount + tax;
+  const balance = Math.max(0, final - advance);
   const toggleCondition = (condition: string) => setConditions((current) =>
     current.includes(condition) ? current.filter((item) => item !== condition) : [...current, condition]);
   const saveDraft = async (form: {
@@ -2143,6 +2145,7 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
       status: "Received",
       serviceAmount: amount,
       discount: 0,
+      tax,
       finalAmount: final,
       payments: advance > 0
         ? [{
@@ -2227,7 +2230,7 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
           className="input"
           type="number"
           min="0"
-          max={amount}
+          max={final}
           value={advance || ""}
           placeholder="0"
           onChange={(event) => setAdvance(Number(event.target.value))}
@@ -2244,6 +2247,11 @@ function ServiceForm({ customers, services, vendors, settings, busy, onSubmit, o
   <span>
     Advance received <strong>{money(advance)}</strong>
   </span>
+  {tax > 0 && (
+    <span>
+      Tax ({serviceTaxRate}% GST) <strong>{money(tax)}</strong>
+    </span>
+  )}
 
   <div className="total-final">
     <span>Total amount</span>
@@ -2626,17 +2634,17 @@ async function downloadInvoice(sale: Sale, settings: ShopSettings) {
   if (settings.gstin) pdf.text(`GSTIN: ${settings.gstin}`, shopTextX, 33);
   pdf.setFont("helvetica", "bold"); pdf.setFontSize(14); pdf.text("SALES INVOICE", 194, 20, { align: "right" });
   pdf.setFont("helvetica", "normal"); pdf.setFontSize(10); pdf.text(sale.invoiceNumber, 194, 27, { align: "right" }); pdf.text(dateLabel(sale.invoiceDate), 194, 33, { align: "right" });
-  pdf.setDrawColor(225, 230, 238); pdf.line(16, 43, 194, 43);
+  pdf.setDrawColor(0, 0, 0); pdf.line(16, 43, 194, 43);
   pdf.setFont("helvetica", "bold"); pdf.text("BILLED TO", 16, 53); pdf.setFont("helvetica", "normal"); pdf.text(sale.customerName, 16, 60); pdf.text(sale.contactNumber, 16, 66);
   const customerAddressLines = sale.customerAddress ? pdf.splitTextToSize(sale.customerAddress, 75) as string[] : [];
   if (customerAddressLines.length) pdf.text(customerAddressLines, 16, 72);
   let y = 81 + Math.max(0, customerAddressLines.length - 1) * 5;
   const columnDividers = [70, 116, 132, 153, 176];
   const drawTableHeader = (baseline: number) => {
-    pdf.setFillColor(245, 247, 251); pdf.rect(16, baseline - 6, 178, 10, "F");
+    pdf.setFillColor(245, 247, 251); pdf.setDrawColor(0, 0, 0); pdf.rect(16, baseline - 6, 178, 10, "FD");
     pdf.setFont("helvetica", "bold"); pdf.setFontSize(8);
     pdf.text("ITEM", 18, baseline); pdf.text("IMEI / SERIAL", 74, baseline); pdf.text("QTY", 126, baseline, { align: "right" }); pdf.text("RATE", 150, baseline, { align: "right" }); pdf.text("DISCOUNT", 174, baseline, { align: "right" }); pdf.text("AMOUNT", 192, baseline, { align: "right" });
-    pdf.setDrawColor(225, 230, 238);
+    pdf.setDrawColor(0, 0, 0);
     columnDividers.forEach((x) => pdf.line(x, baseline - 6, x, baseline + 5));
   };
   drawTableHeader(y);
@@ -2651,10 +2659,10 @@ async function downloadInvoice(sale: Sale, settings: ShopSettings) {
     pdf.text(pdfMoney(product.discount), 174, y, { align: "right" });
     pdf.text(pdfMoney(product.quantity * product.rate - product.discount), 192, y, { align: "right" });
     y += 9;
-    pdf.setDrawColor(225, 230, 238);
+    pdf.setDrawColor(0, 0, 0); pdf.rect(16, rowTop, 178, y - 3 - rowTop, "S");
     columnDividers.forEach((x) => pdf.line(x, rowTop, x, y - 3));
   });
-  y += 8; pdf.setDrawColor(225, 230, 238); pdf.line(117, y - 4, 194, y - 4);
+  y += 8; pdf.setDrawColor(0, 0, 0); pdf.line(117, y - 4, 194, y - 4);
   const totals: [string, string][] = [["Subtotal", pdfMoney(sale.subtotal)], ["Discount", `- ${pdfMoney(sale.discount)}`], ["Tax", pdfMoney(sale.tax)], ["Invoice total", pdfMoney(sale.finalAmount)], ["Paid", pdfMoney(paymentTotal(sale.payments))], ["Balance due", pdfMoney(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))]];
   pdf.setFontSize(9); totals.forEach(([label, amount], index) => { if (index === 3) pdf.setFont("helvetica", "bold"); else if (index > 3) pdf.setFont("helvetica", "normal"); pdf.text(label, 119, y); pdf.text(amount, 192, y, { align: "right" }); y += 7; });
   y += 14; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8); pdf.text((settings.invoiceFooter || "Thank you for your business.").slice(0, 100), 16, y);
@@ -2677,7 +2685,7 @@ function printInvoice(sale: Sale, settings: ShopSettings) {
   const logoBackground = settings.logoDataUrl ? "#fff" : "#000";
   const logo = `<img class="shop-logo" style="background:${logoBackground}" src="${escapeHtml(settings.logoDataUrl || BRAND_LOGO_PATH)}" alt="AH Mobiles">`;
   const gstin = settings.gstin ? `<div class="muted">GSTIN: ${escapeHtml(settings.gstin)}</div>` : "";
-  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:13px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #ddd}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:120px;height:80px;object-fit:contain;background:#000;border-radius:4px}.muted{color:#666;font-size:12px}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #ddd}th:not(:last-child),td:not(:last-child){border-right:1px solid #ddd}th{font-size:10px;color:#666}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #bbb;padding-top:10px}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}${sale.customerAddress ? `<br>${escapeHtml(sale.customerAddress)}` : ""}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p>${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
+  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:13px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #000}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:120px;height:80px;object-fit:contain;background:#000;border-radius:4px}.muted{color:#666;font-size:12px}table{width:100%;border:1px solid #000;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #000;padding:7px 5px}th:not(:last-child),td:not(:last-child){border-right:1px solid #000}th{font-size:10px;color:#111}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #000;padding-top:10px}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}${sale.customerAddress ? `<br>${escapeHtml(sale.customerAddress)}` : ""}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p>${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
   popup.document.close();
 }
 
@@ -2747,8 +2755,9 @@ function printServiceInvoice(service: ServiceJob, settings: ShopSettings, forceT
     .meta-block { text-align: right; }
     .meta-block h2 { font-size: 18px; color: #222; }
     .bill-to { display: flex; justify-content: space-between; background: #fafbfc; border: 1px solid #edf0f5; border-radius: 8px; padding: 14px 18px; margin-bottom: 18px; }
-    table { width: 100%; border-collapse: collapse; margin: 18px 0; }
-    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e5e9f0; font-size: 13px; }
+    table { width: 100%; border: 1px solid #000; border-collapse: collapse; margin: 18px 0; }
+    th, td { text-align: left; padding: 10px 8px; border-right: 1px solid #000; border-bottom: 1px solid #000; font-size: 13px; }
+    th:last-child, td:last-child { border-right: 0; }
     th { font-size: 11px; text-transform: uppercase; color: #666; background: #f8fafc; }
     aside { margin-left: auto; width: 280px; margin-top: 12px; }
     aside p { display: flex; justify-content: space-between; margin: 6px 0; }
@@ -2973,7 +2982,7 @@ function CustomersPage({ customers, sales, services, vendors, search, onSearch, 
             <span>Outstanding<strong>{money(outstanding)}</strong></span>
           </div>
         </div>
-        <div className="panel table-panel">
+        <div className="panel table-panel customer-sales">
           <div className="panel-heading"><div><h2>Sales history</h2><p>Invoices connected to this customer.</p></div></div>
           {customerSales.length ? <SalesTable sales={customerSales} /> : <div className="quiet-empty">No sales recorded for this customer.</div>}
         </div>
@@ -4670,6 +4679,28 @@ function SettingsPage({ settings, identity, canEdit, onSave, onChangePassword }:
             <FormField label="Invoice footer"><textarea className="input textarea" value={form.invoiceFooter} onChange={(event) => update("invoiceFooter", event.target.value)} /></FormField>
             <div className="invoice-format-preview"><span>Next invoice numbers</span><strong>{form.salesPrefix || "SAL"}-{businessYear()}-0001</strong><strong>{form.servicePrefix || "SRV"}-{businessYear()}-0001</strong></div>
           </div>
+        </section>
+        <section className="panel taxation-panel">
+          <div className="taxation-head">
+            <span className="step-number"><ShieldCheck size={16} /></span>
+            <div><h2>Taxation &amp; Fiscal Slabs</h2><p>Default GST percentage applied to new billing sessions.</p></div>
+            <label className="checkbox-wrap taxation-toggle">
+              <input type="checkbox" checked={form.enableTax === true} onChange={(event) => update("enableTax", event.target.checked)} />
+              <span>Apply tax</span>
+            </label>
+          </div>
+          <fieldset className="tax-slab-group" disabled={!form.enableTax}>
+            <legend>DEFAULT GST TAX RATE FOR BILLING</legend>
+            <div className="tax-slab-grid">
+              {[0, 5, 12, 18, 28].map((rate) => (
+                <label className={`tax-slab-option ${form.taxRate === rate ? "selected" : ""}`} key={rate}>
+                  <input type="radio" name="taxRate" value={rate} checked={(form.taxRate ?? 18) === rate} onChange={() => update("taxRate", rate)} />
+                  <span className="tax-slab-radio" aria-hidden="true" />
+                  <strong>{rate === 0 ? "0% (Exempt)" : `${rate}% GST`}</strong>
+                </label>
+              ))}
+            </div>
+          </fieldset>
         </section>
         </fieldset>
         {canEdit && <div className="form-footer"><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={16} /> Save settings</>}</Button></div>}
