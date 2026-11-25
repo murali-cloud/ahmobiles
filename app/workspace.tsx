@@ -59,6 +59,10 @@ function deviceLabel(item: { category?: ProductCategory; brand: string; mobileMo
   return `${item.brand}${model ? ` ${model}` : ""}`.trim();
 }
 
+function vendorServiceProduct(service: Pick<VendorService, "product" | "brand" | "mobileModel">): string {
+  return service.product?.trim() || [service.brand, service.mobileModel].filter(Boolean).join(" ");
+}
+
 function money(value: number): string {
   return new Intl.NumberFormat("en-IN", {
     style: "currency", currency: "INR", maximumFractionDigits: 0,
@@ -66,7 +70,106 @@ function money(value: number): string {
 }
 
 function pdfMoney(value: number): string {
+  // jsPDF's built-in fonts lack the rupee glyph; INR marks where its image should be drawn.
   return money(value).replace("₹", "INR").replace(/\u00a0/g, " ");
+}
+
+function drawPdfTextWithRupeeSymbol(pdf: jsPDF, text: string, x: number, y: number, rupeeSymbol: string) {
+  text.split(/(INR)/g).forEach((part) => {
+    if (part === "INR") {
+      pdf.addImage(rupeeSymbol, "PNG", x, y - 3.7, 4.2, 4.5);
+      x += 4.7;
+      return;
+    }
+    if (part) {
+      pdf.text(part, x, y);
+      x += pdf.getTextWidth(part);
+    }
+  });
+}
+
+type PdfTableColumn = { title: string; width: number };
+
+function drawPdfReportTitle(pdf: jsPDF, title: string, x: number, y: number, width: number) {
+  pdf.setFillColor(232, 240, 255);
+  pdf.setDrawColor(65, 111, 242);
+  pdf.setTextColor(31, 58, 95);
+  pdf.setLineWidth(0.4);
+  pdf.rect(x, y, width, 10, "FD");
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(18);
+  pdf.text(title, x + 3, y + 7);
+  pdf.setTextColor(0, 0, 0);
+}
+
+function drawPdfReportSummary(pdf: jsPDF, lines: [string, string], x: number, y: number, width: number, rupeeSymbol: string): number {
+  const contentWidth = Math.max(5, width - 8);
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(10);
+  const firstLine = pdf.splitTextToSize(lines[0], contentWidth) as string[];
+  const secondLine = pdf.splitTextToSize(lines[1], contentWidth) as string[];
+  const secondLineY = y + 5 + firstLine.length * 4.5 + 1;
+  const height = secondLineY - y + secondLine.length * 4.5;
+  pdf.setFillColor(247, 249, 253);
+  pdf.setDrawColor(166, 189, 241);
+  pdf.setLineWidth(0.3);
+  pdf.rect(x, y, width, height, "FD");
+  pdf.setTextColor(58, 72, 96);
+  pdf.setFont("helvetica", "normal");
+  firstLine.forEach((line, index) => drawPdfTextWithRupeeSymbol(pdf, line, x + 4, y + 5 + index * 4.5, rupeeSymbol));
+  pdf.setFont("helvetica", "bold");
+  secondLine.forEach((line, index) => drawPdfTextWithRupeeSymbol(pdf, line, x + 4, secondLineY + index * 4.5, rupeeSymbol));
+  pdf.setTextColor(0, 0, 0);
+  return y + height;
+}
+
+function drawPdfTableHeader(pdf: jsPDF, columns: PdfTableColumn[], x: number, y: number): number {
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(9);
+  const headerLines = columns.map((column) =>
+    pdf.splitTextToSize(column.title, Math.max(5, column.width - 2)) as string[],
+  );
+  const headerHeight = Math.max(10, ...headerLines.map((lines) => lines.length * 4.2 + 2));
+  const tableWidth = columns.reduce((total, column) => total + column.width, 0);
+  pdf.setFillColor(0, 0, 0);
+  pdf.setFillColor(238, 242, 248);
+  pdf.rect(x, y - 4, tableWidth, headerHeight, "F");
+  pdf.setDrawColor(0, 0, 0);
+  pdf.setLineWidth(0.25);
+  pdf.setTextColor(0, 0, 0);
+  columns.forEach((column, index) => {
+    pdf.rect(x, y - 4, column.width, headerHeight, "S");
+    pdf.text(headerLines[index], x + 1, y, { maxWidth: Math.max(5, column.width - 2) });
+    x += column.width;
+  });
+  pdf.setFont("helvetica", "normal");
+  return y + headerHeight;
+}
+
+function wrapPdfTableRow(pdf: jsPDF, columns: PdfTableColumn[], values: string[]): string[][] {
+  return columns.map((column, index) =>
+    pdf.splitTextToSize(String(values[index] || "—"), Math.max(5, column.width - 2)) as string[],
+  );
+}
+
+function pdfTableRowHeight(lines: string[][], minimumHeight = 10): number {
+  return Math.max(minimumHeight, ...lines.map((cellLines) => cellLines.length * 4 + 3));
+}
+
+function drawPdfTableRow(pdf: jsPDF, columns: PdfTableColumn[], lines: string[][], x: number, y: number, rupeeSymbol: string, minimumHeight = 10): number {
+  const rowHeight = pdfTableRowHeight(lines, minimumHeight);
+  pdf.setDrawColor(0, 0, 0);
+  pdf.setLineWidth(0.2);
+  pdf.setTextColor(0, 0, 0);
+  pdf.setFontSize(9);
+  columns.forEach((column, index) => {
+    pdf.rect(x, y - 4, column.width, rowHeight, "S");
+    lines[index].forEach((line, lineIndex) =>
+      drawPdfTextWithRupeeSymbol(pdf, line, x + 1, y + lineIndex * 4, rupeeSymbol),
+    );
+    x += column.width;
+  });
+  return rowHeight;
 }
 
 function createRupeeSymbolImage(): string | null {
@@ -1090,7 +1193,7 @@ export default function Workspace() {
                 <Button onClick={() => { setModal(null); openPayment("service", current.id, true); }}><CreditCard size={16} /> Collect payment</Button>
               </div>
             </div>
-            <style>{`@keyframes paymentRequiredIn{from{opacity:0;transform:translateY(18px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}@keyframes paymentRequiredPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.18)}50%{box-shadow:0 0 0 12px rgba(245,158,11,0)}}.payment-required-backdrop{backdrop-filter:blur(7px);background:rgba(15,23,42,.48)}.payment-required-modal{width:min(460px,calc(100vw - 32px));padding:30px;border:1px solid rgba(255,255,255,.75);border-radius:22px;box-shadow:0 28px 90px rgba(15,23,42,.28);animation:paymentRequiredIn .32s cubic-bezier(.2,.8,.2,1) both}.payment-required-icon{width:58px;height:58px;border-radius:18px;display:grid;place-items:center;margin-bottom:18px;color:#b45309;background:linear-gradient(145deg,#fff7df,#ffedb3);animation:paymentRequiredPulse 2s ease-in-out infinite}.payment-required-modal h2{margin:8px 0;font-size:24px;letter-spacing:-.7px;color:#172033}.payment-required-copy{margin:0 0 20px;color:#667085;line-height:1.6}.payment-required-summary{padding:15px 17px;border:1px solid #edf0f5;border-radius:15px;background:#fafbfc}.payment-required-summary>div{display:flex;justify-content:space-between;gap:16px;padding:7px 0;color:#667085;font-size:13px}.payment-required-summary strong{color:#273449;text-align:right}.payment-required-summary .payment-required-due{margin-top:8px;padding-top:13px;border-top:1px solid #e6eaf0;align-items:center}.payment-required-due span{font-weight:600;color:#344054}.payment-required-due strong{font-size:23px;color:#b45309}.payment-required-note{display:flex;gap:9px;align-items:flex-start;margin:16px 0 4px;color:#667085;font-size:12px;line-height:1.5}.payment-required-note svg{flex:none;color:#16a085;margin-top:1px}.payment-required-actions{padding:18px 0 0;margin-top:8px}.payment-required-actions button:last-child{box-shadow:0 7px 18px rgba(37,99,235,.2)}`}</style>
+            <style>{`@keyframes paymentRequiredIn{from{opacity:0;transform:translateY(18px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}@keyframes paymentRequiredPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.18)}50%{box-shadow:0 0 0 12px rgba(245,158,11,0)}}.payment-required-backdrop{backdrop-filter:blur(7px);background:rgba(15,23,42,.48)}.payment-required-modal{width:min(460px,calc(100vw - 32px));padding:30px;border:1px solid rgba(255,255,255,.75);border-radius:22px;box-shadow:0 28px 90px rgba(15,23,42,.28);animation:paymentRequiredIn .32s cubic-bezier(.2,.8,.2,1) both}.payment-required-icon{width:58px;height:58px;border-radius:18px;display:grid;place-items:center;margin-bottom:18px;color:#b45309;background:linear-gradient(145deg,#fff7df,#ffedb3);animation:paymentRequiredPulse 2s ease-in-out infinite}.payment-required-modal h2{margin:8px 0;font-size:26px;letter-spacing:-.7px;color:#172033}.payment-required-copy{margin:0 0 20px;color:#667085;line-height:1.6}.payment-required-summary{padding:15px 17px;border:1px solid #edf0f5;border-radius:15px;background:#fafbfc}.payment-required-summary>div{display:flex;justify-content:space-between;gap:16px;padding:7px 0;color:#667085;font-size:14px}.payment-required-summary strong{color:#273449;text-align:right}.payment-required-summary .payment-required-due{margin-top:8px;padding-top:13px;border-top:1px solid #e6eaf0;align-items:center}.payment-required-due span{font-weight:600;color:#344054}.payment-required-due strong{font-size:25px;color:#b45309}.payment-required-note{display:flex;gap:9px;align-items:flex-start;margin:16px 0 4px;color:#667085;font-size:13px;line-height:1.5}.payment-required-note svg{flex:none;color:#16a085;margin-top:1px}.payment-required-actions{padding:18px 0 0;margin-top:8px}.payment-required-actions button:last-child{box-shadow:0 7px 18px rgba(37,99,235,.2)}`}</style>
           </div>
         );
         return;
@@ -1684,7 +1787,7 @@ function Dashboard({ data, period, setPeriod, revenuePeriod, setRevenuePeriod, c
               ? <div className="chart-empty"><strong>Choose a valid date range</strong><span>Select both dates to see revenue for that period.</span></div>
               : <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData} margin={{ top: 12, right: 9, left: -18, bottom: 0 }}>
                 <defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#4677f5" stopOpacity={0.17} /><stop offset="100%" stopColor="#4677f5" stopOpacity={0} /></linearGradient><linearGradient id="servicesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#27b69d" stopOpacity={0.16} /><stop offset="100%" stopColor="#27b69d" stopOpacity={0} /></linearGradient><linearGradient id="vendorServicesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8c71e8" stopOpacity={0.16} /><stop offset="100%" stopColor="#8c71e8" stopOpacity={0} /></linearGradient></defs>
-                <CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} dy={8} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} tickFormatter={(value: number) => value === 0 ? "₹0" : `₹${value / 1000}k`} /><Tooltip formatter={(value) => money(Number(value))} contentStyle={{ border: "1px solid #e8ebf1", borderRadius: 10, fontSize: 14 }} />
+                <CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 15, fill: "#98a1b3" }} dy={8} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 15, fill: "#98a1b3" }} tickFormatter={(value: number) => value === 0 ? "₹0" : `₹${value / 1000}k`} /><Tooltip formatter={(value) => money(Number(value))} contentStyle={{ border: "1px solid #e8ebf1", borderRadius: 10, fontSize: 15 }} />
                 {canViewSales && <Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" strokeWidth={2.3} fill="url(#salesFill)" activeDot={{ r: 4 }} />}{canViewServices && <Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" strokeWidth={2.3} fill="url(#servicesFill)" activeDot={{ r: 4 }} />}{canViewServices && <Area type="monotone" dataKey="vendorServices" name="Vendor services" stroke="#8c71e8" strokeWidth={2.3} fill="url(#vendorServicesFill)" activeDot={{ r: 4 }} />}
               </AreaChart></ResponsiveContainer></div>}
           <div className="chart-legend">{canViewSales && <span><i className="legend-dot blue-dot" />Sales</span>}{canViewServices && <span><i className="legend-dot green-dot" />Services</span>}{canViewServices && <span><i className="legend-dot violet-dot" />Vendor services</span>}</div>
@@ -1828,6 +1931,11 @@ function SalesPage({ sales, search, onSearch, onCreate, onView, onEdit, onDelete
   const pageSize = 8;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const exportSalesPdf = () => {
+    const rupeeSymbol = createRupeeSymbolImage();
+    if (!rupeeSymbol) {
+      window.alert("Could not prepare the rupee symbol for the PDF.");
+      return;
+    }
     const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
     const pageWidth = pdf.internal.pageSize.getWidth();
     const pageHeight = pdf.internal.pageSize.getHeight();
@@ -1842,31 +1950,18 @@ function SalesPage({ sales, search, onSearch, onCreate, onView, onEdit, onDelete
       { title: "PAID", width: 30 },
       { title: "STATUS", width: 24 },
     ];
+    const tableWidth = columns.reduce((sum, column) => sum + column.width, 0);
     const billed = filtered.reduce((sum, sale) => sum + sale.finalAmount, 0);
     const collected = filtered.reduce((sum, sale) => sum + paymentTotal(sale.payments), 0);
     const balance = filtered.reduce((sum, sale) => sum + Math.max(0, sale.finalAmount - paymentTotal(sale.payments)), 0);
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(16);
-    pdf.text("Sales Report", margin, 13);
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(9);
-    pdf.text(`Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`, margin, 20);
-    pdf.text(`Invoices: ${filtered.length}  |  Billed: ${pdfMoney(billed)}  |  Paid: ${pdfMoney(collected)}  |  Balance: ${pdfMoney(balance)}`, margin, 26);
+    drawPdfReportTitle(pdf, "Sales Report", margin, 7, tableWidth);
+    const summaryBottom = drawPdfReportSummary(pdf, [
+      `Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`,
+      `Invoices: ${filtered.length}  |  Billed: ${pdfMoney(billed)}  |  Paid: ${pdfMoney(collected)}  |  Balance: ${pdfMoney(balance)}`,
+    ], margin, 20, tableWidth, rupeeSymbol);
 
-    const drawTableHeader = (y: number) => {
-      pdf.setFillColor(238, 242, 248);
-      pdf.rect(margin, y - 4, columns.reduce((sum, column) => sum + column.width, 0), 7, "F");
-      pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(7);
-      let x = margin;
-      columns.forEach((column) => {
-        pdf.text(column.title, x + 1, y);
-        x += column.width;
-      });
-      pdf.setFont("helvetica", "normal");
-      return y + 6;
-    };
-    let y = drawTableHeader(34);
+    const drawTableHeader = (y: number) => drawPdfTableHeader(pdf, columns, margin, y);
+    let y = drawTableHeader(summaryBottom + 8);
     filtered.forEach((sale) => {
       const paid = paymentTotal(sale.payments);
       const values = [
@@ -1879,25 +1974,18 @@ function SalesPage({ sales, search, onSearch, onCreate, onView, onEdit, onDelete
         pdfMoney(paid),
         statusOf(sale.finalAmount, paid),
       ];
-      const lines = values.map((value, index) => pdf.splitTextToSize(value || "—", columns[index].width - 2) as string[]);
-      const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
+      const lines = wrapPdfTableRow(pdf, columns, values);
+      const rowHeight = pdfTableRowHeight(lines);
       if (y + rowHeight > pageHeight - 12) {
         pdf.addPage();
         y = drawTableHeader(14);
       }
-      let x = margin;
-      lines.forEach((cellLines, index) => {
-        pdf.text(cellLines, x + 1, y, { maxWidth: columns[index].width - 2 });
-        x += columns[index].width;
-      });
-      y += rowHeight;
-      pdf.setDrawColor(225, 230, 238);
-      pdf.line(margin, y - 2, margin + columns.reduce((sum, column) => sum + column.width, 0), y - 2);
+      y += drawPdfTableRow(pdf, columns, lines, margin, y, rupeeSymbol);
     });
     const pageCount = pdf.getNumberOfPages();
     for (let page = 1; page <= pageCount; page += 1) {
       pdf.setPage(page);
-      pdf.setFontSize(8);
+      pdf.setFontSize(9);
       pdf.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 5, { align: "right" });
     }
     pdf.save(`sales-report-${dateInputValue()}.pdf`);
@@ -2050,7 +2138,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
             <span className="step-number">03</span>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
               <div><h2>Payment details</h2><p>Record the amount received today.</p></div>
-              <label className="checkbox-wrap" style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontWeight: 500, fontSize: 13 }}>
+              <label className="checkbox-wrap" style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontWeight: 500, fontSize: 14 }}>
                 <input type="checkbox" checked={enableTax} onChange={(event) => {
                   setEnableTax(event.target.checked);
                 }} />
@@ -2327,6 +2415,11 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
   const pageSize = 8;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const exportServicesPdf = () => {
+    const rupeeSymbol = createRupeeSymbolImage();
+    if (!rupeeSymbol) {
+      window.alert("Could not prepare the rupee symbol for the PDF.");
+      return;
+    }
     const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
     const pageWidth = pdf.internal.pageSize.getWidth();
     const pageHeight = pdf.internal.pageSize.getHeight();
@@ -2337,36 +2430,24 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
       { title: "IN CUSTOMER NAME", width: 28 },
       { title: "MOBILE WITH MODEL", width: 32 },
       { title: "CUSTOMER NUMBER", width: 25 },
+      { title: "VENDOR", width: 22 },
       { title: "STATUS", width: 20 },
       { title: "DELIVERY DATE", width: 21 },
       { title: "DELIVERY CUSTOMER", width: 31 },
       { title: "SERVICE CHARGE", width: 23 },
     ];
+    const tableWidth = columns.reduce((sum, column) => sum + column.width, 0);
     const orderedServices = filtered;
     const serviceTotal = orderedServices.reduce((sum, service) =>
       sum + (service.returnOutcome === "Not repaired" ? 0 : service.serviceAmount), 0);
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(16);
-    pdf.text("Service Desk Report", margin, 13);
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(9);
-    pdf.text(`Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`, margin, 20);
-    pdf.text(`Jobs: ${orderedServices.length}  |  Service charges: ${pdfMoney(serviceTotal)}`, margin, 26);
+    drawPdfReportTitle(pdf, "Service Desk Report", margin, 7, tableWidth);
+    const summaryBottom = drawPdfReportSummary(pdf, [
+      `Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`,
+      `Jobs: ${orderedServices.length}  |  Service charges: ${pdfMoney(serviceTotal)}`,
+    ], margin, 20, tableWidth, rupeeSymbol);
 
-    const drawTableHeader = (y: number) => {
-      pdf.setFillColor(238, 242, 248);
-      pdf.rect(margin, y - 4, columns.reduce((sum, column) => sum + column.width, 0), 7, "F");
-      pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(7);
-      let x = margin;
-      columns.forEach((column) => {
-        pdf.text(column.title, x + 1, y);
-        x += column.width;
-      });
-      pdf.setFont("helvetica", "normal");
-      return y + 6;
-    };
-    let y = drawTableHeader(34);
+    const drawTableHeader = (y: number) => drawPdfTableHeader(pdf, columns, margin, y);
+    let y = drawTableHeader(summaryBottom + 8);
     orderedServices.forEach((service) => {
       const values = [
         service.serviceNumber,
@@ -2380,36 +2461,18 @@ function ServicesPage({ services, vendors, search, onSearch, onCreate, onView, o
         service.deliveryOutPerson || "—",
         pdfMoney(service.returnOutcome === "Not repaired" ? 0 : service.serviceAmount),
       ];
-      const lines = values.map((value, index) => {
-  const column = columns[index];
-  const width = column?.width ?? 25;
-  return pdf.splitTextToSize(String(value || "—"), Math.max(5, width - 2)) as string[];
-});
-      const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
+      const lines = wrapPdfTableRow(pdf, columns, values);
+      const rowHeight = pdfTableRowHeight(lines);
       if (y + rowHeight > pageHeight - 12) {
         pdf.addPage();
         y = drawTableHeader(14);
       }
-      let x = margin;
-      lines.forEach((cellLines, index) => {
-  const column = columns[index];
-
-  if (!column) return;
-
-  pdf.text(cellLines, x + 1, y, {
-    maxWidth: Math.max(5, column.width - 2),
-  });
-
-  x += column.width;
-});
-      y += rowHeight;
-      pdf.setDrawColor(225, 230, 238);
-      pdf.line(margin, y - 2, margin + columns.reduce((sum, column) => sum + column.width, 0), y - 2);
+      y += drawPdfTableRow(pdf, columns, lines, margin, y, rupeeSymbol);
     });
     const pageCount = pdf.getNumberOfPages();
     for (let page = 1; page <= pageCount; page += 1) {
       pdf.setPage(page);
-      pdf.setFontSize(8);
+      pdf.setFontSize(9);
       pdf.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 5, { align: "right" });
     }
     pdf.save(`service-report-${dateInputValue()}.pdf`);
@@ -2535,7 +2598,7 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
         return <article className="ready-card" key={service.id}>
           <div className="ready-card-top"><span className="ready-device-icon"><Store size={20} /></span><StatusBadge status="Ready" /></div>
           <div className="ready-card-id">{service.serviceNumber}</div>
-          <h2>{service.brand} {service.mobileModel}</h2>
+          <h2>{vendorServiceProduct(service)}</h2>
           <p>{vendor?.name ?? "Vendor not found"} · {service.receivedCondition || "Condition not specified"}</p>
           <div className="ready-customer"><span className="mini-avatar amber-avatar">{service.customerName[0]?.toUpperCase() || "?"}</span><span><strong>In person: {service.customerName}</strong><small>{service.customerNumber}</small></span></div>
           <div className="ready-card-meta">
@@ -2661,12 +2724,13 @@ async function downloadInvoice(sale: Sale, settings: ShopSettings) {
   const shopTextX = 72;
   const logoFormat = logoData.startsWith("data:image/png") ? "PNG" : "JPEG";
   pdf.addImage(logoData, logoFormat, 16, 8, 48, 32);
-  pdf.setFont("helvetica", "normal"); pdf.setFontSize(9);
+  pdf.setFont("helvetica", "normal"); pdf.setFontSize(10);
   if (settings.address) pdf.text(settings.address, shopTextX, 20, { maxWidth: 105 });
   if (settings.phone) pdf.text(`Phone: ${settings.phone}`, shopTextX, 27);
   if (settings.gstin) pdf.text(`GSTIN: ${settings.gstin}`, shopTextX, 33);
-  pdf.setFont("helvetica", "bold"); pdf.setFontSize(14); pdf.text("SALES INVOICE", 194, 20, { align: "right" });
-  pdf.setFont("helvetica", "normal"); pdf.setFontSize(10); pdf.text(sale.invoiceNumber, 194, 27, { align: "right" }); pdf.text(dateLabel(sale.invoiceDate), 194, 33, { align: "right" });
+  pdf.setFillColor(224, 235, 255); pdf.setDrawColor(0, 0, 0); pdf.setLineWidth(0.3); pdf.rect(154, 5, 40, 12, "FD");
+  pdf.setFont("helvetica", "bold"); pdf.setFontSize(12); pdf.text("SALES INVOICE", 192, 13, { align: "right" });
+  pdf.setFont("helvetica", "normal"); pdf.setFontSize(11); pdf.text(sale.invoiceNumber, 194, 27, { align: "right" }); pdf.text(dateLabel(sale.invoiceDate), 194, 33, { align: "right" });
   pdf.setDrawColor(0, 0, 0); pdf.line(16, 43, 194, 43);
   pdf.setFont("helvetica", "bold"); pdf.text("BILLED TO", 16, 53); pdf.setFont("helvetica", "normal"); pdf.text(sale.customerName, 16, 60); pdf.text(sale.contactNumber, 16, 66);
   const customerAddressLines = sale.customerAddress ? pdf.splitTextToSize(sale.customerAddress, 75) as string[] : [];
@@ -2674,16 +2738,16 @@ async function downloadInvoice(sale: Sale, settings: ShopSettings) {
   let y = 81 + Math.max(0, customerAddressLines.length - 1) * 5;
   const columnDividers = [70, 116, 132, 153, 176];
   const drawTableHeader = (baseline: number) => {
-    pdf.setFillColor(245, 247, 251); pdf.setDrawColor(0, 0, 0); pdf.rect(16, baseline - 6, 178, 10, "FD");
-    pdf.setFont("helvetica", "bold"); pdf.setFontSize(8);
+    pdf.setFillColor(0, 0, 0); pdf.setFillColor(238, 242, 248); pdf.setDrawColor(0, 0, 0); pdf.rect(16, baseline - 6, 178, 10, "FD");
+    pdf.setFont("helvetica", "bold"); pdf.setFontSize(9);
     pdf.text("ITEM", 18, baseline); pdf.text("IMEI / SERIAL", 74, baseline); pdf.text("QTY", 126, baseline, { align: "right" }); pdf.text("RATE", 150, baseline, { align: "right" }); pdf.text("DISCOUNT", 174, baseline, { align: "right" }); pdf.text("AMOUNT", 192, baseline, { align: "right" });
     pdf.setDrawColor(0, 0, 0);
     columnDividers.forEach((x) => pdf.line(x, baseline - 6, x, baseline + 5));
   };
   drawTableHeader(y);
-  y += 11; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8.5);
+  y += 11; pdf.setFont("helvetica", "normal"); pdf.setFontSize(9);
   sale.products.forEach((product) => {
-    if (y > 250) { pdf.addPage(); y = 22; drawTableHeader(y); y += 11; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8.5); }
+    if (y > 250) { pdf.addPage(); y = 22; drawTableHeader(y); y += 11; pdf.setFont("helvetica", "normal"); pdf.setFontSize(9); }
     const rowTop = y - 6;
     pdf.text(deviceLabel(product).slice(0, 27), 18, y);
     pdf.text(product.imei || "—", 74, y);
@@ -2697,8 +2761,8 @@ async function downloadInvoice(sale: Sale, settings: ShopSettings) {
   });
   y += 8; pdf.setDrawColor(0, 0, 0); pdf.line(117, y - 4, 194, y - 4);
   const totals: [string, number][] = [["Subtotal", sale.subtotal], ["Discount", -sale.discount], ["Tax", sale.tax], ["Invoice total", sale.finalAmount], ["Paid", paymentTotal(sale.payments)], ["Balance due", Math.max(0, sale.finalAmount - paymentTotal(sale.payments))]];
-  pdf.setFontSize(9); totals.forEach(([label, amount], index) => { if (index === 3) pdf.setFont("helvetica", "bold"); else if (index > 3) pdf.setFont("helvetica", "normal"); pdf.text(label, 119, y); addInvoiceMoney(pdf, amount, 192, y, rupeeSymbol); y += 7; });
-  y += 14; pdf.setFont("helvetica", "normal"); pdf.setFontSize(8); pdf.text((settings.invoiceFooter || "Thank you for your business.").slice(0, 100), 105, y, { align: "center" });
+  pdf.setFontSize(10); totals.forEach(([label, amount], index) => { if (index === 3) pdf.setFont("helvetica", "bold"); else if (index > 3) pdf.setFont("helvetica", "normal"); pdf.text(label, 119, y); addInvoiceMoney(pdf, amount, 192, y, rupeeSymbol); y += 7; });
+  y += 14; pdf.setFont("helvetica", "normal"); pdf.setFontSize(9); pdf.text((settings.invoiceFooter || "Thank you for your business.").slice(0, 100), 105, y, { align: "center" });
   y += 20; pdf.setDrawColor(180, 185, 195); pdf.line(16, y, 80, y); pdf.line(130, y, 194, y); pdf.text("Customer signature", 16, y + 6); pdf.text("Authorized signature", 130, y + 6);
   pdf.save(`${sale.invoiceNumber}.pdf`);
 }
@@ -2949,30 +3013,49 @@ async function downloadServiceReceipt(service: ServiceJob, settings: ShopSetting
     window.alert(reason instanceof Error ? reason.message : "Could not load the service receipt logo.");
     return;
   }
+  const rupeeSymbol = createRupeeSymbolImage();
+  if (!rupeeSymbol) {
+    window.alert("Could not prepare the rupee symbol for the PDF.");
+    return;
+  }
   const pdf = new jsPDF({ unit: "mm", format: [80, 190] });
   const logoFormat = logoData.startsWith("data:image/png") ? "PNG" : "JPEG";
   pdf.addImage(logoData, logoFormat, 26, 3, 28, 19);
-  pdf.setFontSize(12); pdf.setFont("helvetica", "bold"); pdf.text(settings.shopName || "AH Mobiles", 40, 33, { align: "center" });
-  pdf.setFont("helvetica", "normal"); pdf.setFontSize(9); pdf.text(`Service receipt · ${service.serviceNumber}`, 40, 39, { align: "center" });
-  let y = 45;
-  pdf.setFontSize(8);
-  if (settings.address) { pdf.text(settings.address.slice(0, 72), 7, y); y += 5; }
-  if (settings.phone) { pdf.text(settings.phone, 7, y); y += 5; }
-  pdf.text(`In date: ${dateLabel(service.inDate)}`, 7, y); y += 5; pdf.line(7, y, 73, y); y += 8;
-  pdf.setFont("helvetica", "bold"); pdf.setFontSize(9); pdf.text(service.customerName.slice(0, 35), 7, y); y += 6;
-  pdf.setFont("helvetica", "normal"); pdf.setFontSize(8); pdf.text(service.contactNumber, 7, y); y += 6;
-  if (service.customerAddress) {
-    const addressLines = pdf.splitTextToSize(service.customerAddress, 66) as string[];
-    pdf.text(addressLines, 7, y);
-    y += addressLines.length * 4 + 2;
-  }
-  pdf.text(deviceLabel(service).slice(0, 34), 7, y); y += 6; pdf.text(`IMEI: ${service.imei || "—"}`, 7, y); y += 8;
-  pdf.text(`Fault: ${service.reportedFault}`.slice(0, 70), 7, y); y += 7;
-  pdf.text(`Condition: ${service.receivedConditions.join(", ")}`.slice(0, 70), 7, y); y += 7; pdf.line(7, y, 73, y); y += 8;
-  pdf.text(`Estimate: ${pdfMoney(service.serviceAmount - service.discount)}`, 7, y); y += 6;
-  pdf.text(`Advance: ${pdfMoney(servicePaid(service))}`, 7, y); y += 6;
-  pdf.text(`Balance: ${pdfMoney(serviceDue(service))}`, 7, y); y += 12;
-  pdf.setFontSize(7); pdf.text("Device passwords and patterns are never printed.", 7, y);
+  pdf.setFontSize(14); pdf.setFont("helvetica", "bold"); pdf.text(settings.shopName || "AH Mobiles", 40, 33, { align: "center" });
+  drawPdfReportTitle(pdf, "SERVICE RECEIPT", 7, 36, 66);
+  const columns = [{ title: "DETAIL", width: 19 }, { title: "INFORMATION", width: 47 }];
+  const drawHeader = (baseline: number) => drawPdfTableHeader(pdf, columns, 7, baseline);
+  let y = drawHeader(50);
+  pdf.setFontSize(9);
+  const rows = [
+    ["Service bill", service.serviceNumber],
+    ...(settings.address ? [["Shop address", settings.address]] : []),
+    ...(settings.phone ? [["Shop phone", settings.phone]] : []),
+    ["In date", dateLabel(service.inDate)],
+    ["Customer", service.customerName],
+    ["Contact", service.contactNumber],
+    ...(service.customerAddress ? [["Address", service.customerAddress]] : []),
+    ["Device", deviceLabel(service)],
+    ["IMEI", service.imei || "—"],
+    ["Reported fault", service.reportedFault],
+    ["Condition", service.receivedConditions.join(", ") || "—"],
+    ["Out date", service.deliveryOutDate ? dateLabel(service.deliveryOutDate) : "—"],
+    ["Out customer", service.deliveryOutPerson || "—"],
+    ["Estimate", pdfMoney(service.serviceAmount - service.discount)],
+    ["Advance", pdfMoney(servicePaid(service))],
+    ["Balance", pdfMoney(serviceDue(service))],
+    ["Notice", "Device passwords and patterns are never printed."],
+  ];
+  rows.forEach((values) => {
+    const lines = wrapPdfTableRow(pdf, columns, values);
+    const rowHeight = pdfTableRowHeight(lines, 6);
+    if (y + rowHeight > pdf.internal.pageSize.getHeight() - 8) {
+      pdf.addPage([80, 190]);
+      y = drawHeader(12);
+      pdf.setFontSize(9);
+    }
+    y += drawPdfTableRow(pdf, columns, lines, 7, y, rupeeSymbol, 6);
+  });
   pdf.save(`${service.serviceNumber}.pdf`);
 }
 
@@ -3287,7 +3370,7 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
     const filteredVendorServices = servicesForVendor
       .filter((service) => {
         const query = serviceSearch.trim().toLowerCase();
-        return (!query || `${service.serviceNumber} ${service.customerName} ${service.brand} ${service.mobileModel} ${service.customerNumber} ${service.returnOutcome === "Not repaired" ? "Refund" : service.status} ${service.deliveryCustomer ?? ""}`.toLowerCase().includes(query))
+        return (!query || `${service.serviceNumber} ${service.customerName} ${vendorServiceProduct(service)} ${service.customerNumber} ${service.returnOutcome === "Not repaired" ? "Refund" : service.status} ${service.deliveryCustomer ?? ""}`.toLowerCase().includes(query))
           && (serviceStatusFilter === "All statuses" || (serviceStatusFilter === "Refund" ? service.returnOutcome === "Not repaired" : service.status === serviceStatusFilter && service.returnOutcome !== "Not repaired"))
           && (!serviceFrom || service.inDate.slice(0, 10) >= serviceFrom)
           && (!serviceTo || service.inDate.slice(0, 10) <= serviceTo);
@@ -3297,6 +3380,11 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
         : serviceSortBy === "charge-asc" ? (a.returnOutcome === "Not repaired" ? 0 : a.serviceCharge) - (b.returnOutcome === "Not repaired" ? 0 : b.serviceCharge)
         : b.inDate.localeCompare(a.inDate) || b.createdAt.localeCompare(a.createdAt));
     const exportVendorServicesPdf = () => {
+      const rupeeSymbol = createRupeeSymbolImage();
+      if (!rupeeSymbol) {
+        window.alert("Could not prepare the rupee symbol for the PDF.");
+        return;
+      }
       const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
       const pageWidth = pdf.internal.pageSize.getWidth();
       const pageHeight = pdf.internal.pageSize.getHeight();
@@ -3304,75 +3392,47 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
       const columns = [
         { title: "SERVICE BILL NO.", width: 27 },
         { title: "IN DATE", width: 19 },
-        { title: "CUSTOMER", width: 31 },
-        { title: "MOBILE WITH MODEL", width: 34 },
+        { title: "IN CUSTOMER", width: 31 },
+        { title: "PRODUCT", width: 34 },
         { title: "CUSTOMER NUMBER", width: 27 },
         { title: "STATUS", width: 23 },
         { title: "DELIVERY DATE", width: 20 },
-        { title: "DELIVERY CUSTOMER", width: 32 },
+        { title: "OUT CUSTOMER", width: 32 },
         { title: "SERVICE CHARGE", width: 22 },
       ];
+      const tableWidth = columns.reduce((total, column) => total + column.width, 0);
       const totalCharge = filteredVendorServices.reduce((total, service) => total + (service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge), 0);
-      pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(16);
-      pdf.text(`${selectedVendor.name} · Vendor Services`, margin, 13);
-      pdf.setFont("helvetica", "normal");
-      pdf.setFontSize(9);
-      pdf.text(`Mobile: ${selectedVendor.phone}  |  Period: ${serviceFrom || "All"} to ${serviceTo || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`, margin, 20);
-      pdf.text(`Services: ${filteredVendorServices.length}  |  Service charges: ${pdfMoney(totalCharge)}  |  Status: ${serviceStatusFilter}`, margin, 26);
-      const drawHeader = (y: number) => {
-        pdf.setFillColor(238, 242, 248);
-        pdf.rect(margin, y - 4, columns.reduce((total, column) => total + column.width, 0), 7, "F");
-        pdf.setFont("helvetica", "bold");
-        pdf.setFontSize(7);
-        let x = margin;
-        columns.forEach((column) => {
-          pdf.text(column.title, x + 1, y);
-          x += column.width;
-        });
-        pdf.setFont("helvetica", "normal");
-        return y + 6;
-      };
-      let y = drawHeader(34);
+      drawPdfReportTitle(pdf, `${selectedVendor.name} · Vendor Services`, margin, 7, tableWidth);
+      const summaryBottom = drawPdfReportSummary(pdf, [
+        `Mobile: ${selectedVendor.phone}  |  Period: ${serviceFrom || "All"} to ${serviceTo || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`,
+        `Services: ${filteredVendorServices.length}  |  Service charges: ${pdfMoney(totalCharge)}  |  Status: ${serviceStatusFilter}`,
+      ], margin, 20, tableWidth, rupeeSymbol);
+      const drawHeader = (y: number) => drawPdfTableHeader(pdf, columns, margin, y);
+      let y = drawHeader(summaryBottom + 8);
       filteredVendorServices.forEach((service) => {
         const values = [
           service.serviceNumber,
           dateLabel(service.inDate),
           service.customerName,
-          `${service.brand} ${service.mobileModel}`.trim(),
+          vendorServiceProduct(service),
           service.customerNumber,
           service.returnOutcome === "Not repaired" ? "Refund" : service.status,
           service.deliveryDate ? dateLabel(service.deliveryDate) : "—",
           service.deliveryCustomer || "—",
           pdfMoney(service.returnOutcome === "Not repaired" ? 0 : service.serviceCharge),
         ];
-        const lines = values.map((value, index) => {
-  const column = columns[index];
-  const width = column?.width ?? 25;
-
-  return pdf.splitTextToSize(
-    String(value || "—"),
-    Math.max(5, width - 2)
-  ) as string[];
-});
-        const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
+        const lines = wrapPdfTableRow(pdf, columns, values);
+        const rowHeight = pdfTableRowHeight(lines);
         if (y + rowHeight > pageHeight - 12) {
           pdf.addPage();
           y = drawHeader(14);
         }
-        let x = margin;
-        lines.forEach((cellLines, index) => {
-          pdf.text(cellLines, x + 1, y, { maxWidth: columns[index].width - 2 });
-          x += columns[index].width;
-        });
-        y += rowHeight;
-        pdf.setDrawColor(225, 230, 238);
-        pdf.line(margin, y - 2, margin + columns.reduce((total, column) => total + column.width, 0), y - 2);
+        y += drawPdfTableRow(pdf, columns, lines, margin, y, rupeeSymbol);
       });
       const pageCount = pdf.getNumberOfPages();
       for (let page = 1; page <= pageCount; page += 1) {
         pdf.setPage(page);
-        pdf.setFontSize(8);
+        pdf.setFontSize(9);
         pdf.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 5, { align: "right" });
       }
       const filename = selectedVendor.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -3383,7 +3443,7 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
       <div className="panel table-panel">
         <div className="panel-heading"><div><h2>Vendor services</h2><p>Entries saved only for {selectedVendor.name}.</p></div></div>
         <div className="table-toolbar">
-          <label className="table-search"><Search size={16} /><input value={serviceSearch} onChange={(event) => setServiceSearch(event.target.value)} placeholder="Search bill, customer, model or phone…" /></label>
+          <label className="table-search"><Search size={16} /><input value={serviceSearch} onChange={(event) => setServiceSearch(event.target.value)} placeholder="Search bill, customer, product or phone…" /></label>
           <div className="table-filters">
             <label className="select-wrap"><Filter size={15} /><select aria-label="Filter vendor services by status" value={serviceStatusFilter} onChange={(event) => setServiceStatusFilter(event.target.value)}><option>All statuses</option>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}<option>Refund</option></select><ChevronDown size={14} /></label>
             <div className="date-range compact-date-range"><label>From<input aria-label="Vendor services from date" className="input date-filter" type="date" value={serviceFrom} onChange={(event) => setServiceFrom(event.target.value)} /></label><label>To<input aria-label="Vendor services to date" className="input date-filter" type="date" value={serviceTo} onChange={(event) => setServiceTo(event.target.value)} /></label></div>
@@ -3392,11 +3452,11 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
           </div>
         </div>
         {filteredVendorServices.length
-          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>MOBILE WITH MODEL</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}>
+          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>PRODUCT</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}>
             <td><button className="table-primary-link" onClick={() => onEditService(service)} title="View customer & product details">{service.serviceNumber}</button></td>
             <td><span className="muted-cell">{dateLabel(service.inDate)}</span></td>
             <td>{service.customerName}</td>
-            <td><strong>{service.brand} {service.mobileModel}</strong></td>
+            <td><strong>{vendorServiceProduct(service)}</strong></td>
             <td>{service.customerNumber}</td>
             <td>{service.returnOutcome === "Not repaired" ? <StatusBadge status="Refund" /> : <select className={`status-select status-${statusClass(service.status)}`} value={service.status} disabled={!canEdit || service.status === "Returned" || service.returnOutcome === "Not repaired"} aria-label={`Update status for ${service.serviceNumber}`} title={service.status === "Returned" || service.returnOutcome === "Not repaired" ? "This vendor service has already been returned and its status is locked." : undefined} onChange={(event) => { if (event.target.value === "__not_repaired__") onMarkNotRepaired(service); else onStatusChange(service, event.target.value as ServiceStatus); }}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}<option value="__not_repaired__">Not repaired · Return device</option></select>}</td>
             <td><span className="muted-cell">{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</span></td>
@@ -3500,8 +3560,7 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
     inDate: dateInputValue(),
     customerName: "",
     customerAddress: "",
-    brand: "",
-    mobileModel: "",
+    product: "",
     customerNumber: "",
     fault: "",
     status: "Received" as ServiceStatus,
@@ -3536,14 +3595,13 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
     setSaving(true);
     setError("");
     try {
-      const draft = {
+      const draft: Omit<VendorService, "id" | "createdAt" | "vendorId"> = {
         ...parsed.data,
-        // Keep the vendor-reported fault with this vendor service record.
         fault: values.fault.trim(),
         receivedCondition: finalCondition,
         inDate: businessDateTime(parsed.data.inDate),
         deliveryDate: parsed.data.deliveryDate ? businessDateTime(parsed.data.deliveryDate) : undefined,
-      } as Omit<VendorService, "id" | "createdAt" | "vendorId">;
+      };
       await onSave(draft);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not save this vendor service.");
@@ -3559,8 +3617,7 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
     <FormField label="Customer number"><input className="input" inputMode="tel" value={values.customerNumber} onChange={(event) => update("customerNumber", event.target.value)} /></FormField>
     <FormField label="Customer address"><textarea className="input textarea" maxLength={500} value={values.customerAddress} onChange={(event) => update("customerAddress", event.target.value)} placeholder="Street, area, city" /></FormField>
     <FormField label="Fault"><textarea className="input textarea" value={values.fault} onChange={(event) => update("fault", event.target.value)} placeholder="Describe the device fault or issue" /></FormField>
-    <FormField label="Brand"><input className="input" value={values.brand} onChange={(event) => update("brand", event.target.value)} /></FormField>
-    <FormField label="Model"><input className="input" value={values.mobileModel} onChange={(event) => update("mobileModel", event.target.value)} /></FormField>
+    <FormField label="Product"><input className="input" value={values.product} onChange={(event) => update("product", event.target.value)} /></FormField>
     <FormField label="Status"><select className="input" value={values.status} onChange={(event) => update("status", event.target.value)}>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => <option key={status}>{status}</option>)}</select></FormField>
     <FormField label="Received Condition">
       <select
@@ -3639,8 +3696,7 @@ function VendorServiceDetailModal({
     customerName: service.customerName,
     customerNumber: service.customerNumber,
     customerAddress: service.customerAddress || "",
-    brand: service.brand,
-    mobileModel: service.mobileModel,
+    product: vendorServiceProduct(service),
     fault: service.fault || "",
     receivedCondition: service.receivedCondition || "Good condition",
     deliveryDate: service.deliveryDate?.slice(0, 10) || "",
@@ -3669,12 +3725,8 @@ function VendorServiceDetailModal({
       setError("Customer number is required.");
       return;
     }
-    if (!values.brand.trim()) {
-      setError("Brand is required.");
-      return;
-    }
-    if (!values.mobileModel.trim()) {
-      setError("Model is required.");
+    if (!values.product.trim()) {
+      setError("Product is required.");
       return;
     }
     if (values.receivedCondition === "Other" && !otherCondition.trim()) {
@@ -3695,8 +3747,7 @@ function VendorServiceDetailModal({
         customerName: values.customerName.trim(),
         customerNumber: values.customerNumber.trim(),
         customerAddress: values.customerAddress.trim(),
-        brand: values.brand.trim(),
-        mobileModel: values.mobileModel.trim(),
+        product: values.product.trim(),
         fault: values.fault.trim(),
         receivedCondition: finalCondition,
         serviceCharge: Number(values.serviceCharge) || 0,
@@ -3717,7 +3768,7 @@ function VendorServiceDetailModal({
         <div className="modal-header">
           <div>
             <span className="eyebrow">SERVICE VENDOR · {vendor.name.toUpperCase()} · {service.serviceNumber}</span>
-            <h2>{editing ? "Edit vendor service" : `${service.brand} ${service.mobileModel}`}</h2>
+            <h2>{editing ? "Edit vendor service" : vendorServiceProduct(service)}</h2>
           </div>
           <button className="icon-btn" type="button" onClick={onClose} aria-label="Close">
             <X size={18} />
@@ -3729,10 +3780,10 @@ function VendorServiceDetailModal({
             <div style={{ padding: "16px 20px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 13, color: "#718096" }}>Status:</span>
+                  <span style={{ fontSize: 14, color: "#718096" }}>Status:</span>
                   <StatusBadge status={service.returnOutcome === "Not repaired" ? "Refund" : service.status} />
                 </div>
-                <div style={{ fontSize: 13, color: "#718096" }}>
+                <div style={{ fontSize: 14, color: "#718096" }}>
                   In date: <strong>{dateLabel(service.inDate)}</strong>
                 </div>
               </div>
@@ -3740,7 +3791,7 @@ function VendorServiceDetailModal({
               {/* Customer Details */}
               <div className="panel detail-panel" style={{ marginBottom: 14 }}>
                 <div className="panel-heading" style={{ padding: "10px 14px", borderBottom: "1px solid #edf0f4" }}>
-                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
+                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
                 </div>
                 <div className="detail-fields" style={{ padding: "12px 14px" }}>
                   <DetailField label="In person / Name" value={service.customerName} />
@@ -3754,11 +3805,10 @@ function VendorServiceDetailModal({
               {/* Product Details */}
               <div className="panel detail-panel" style={{ marginBottom: 14 }}>
                 <div className="panel-heading" style={{ padding: "10px 14px", borderBottom: "1px solid #edf0f4" }}>
-                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Product details</h3>
+                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Product details</h3>
                 </div>
                 <div className="detail-fields" style={{ padding: "12px 14px" }}>
-                  <DetailField label="Brand" value={service.brand} />
-                  <DetailField label="Model" value={service.mobileModel} />
+                  <DetailField label="Product" value={vendorServiceProduct(service) || "—"} />
                   <DetailField label="Received condition" value={service.receivedCondition || "Not specified"} />
                   <DetailField label="Reported fault" value={service.fault || "None recorded"} />
                 </div>
@@ -3767,7 +3817,7 @@ function VendorServiceDetailModal({
               {/* Service & Charge Details */}
               <div className="panel detail-panel">
                 <div className="panel-heading" style={{ padding: "10px 14px", borderBottom: "1px solid #edf0f4" }}>
-                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Service & charges</h3>
+                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Service & charges</h3>
                 </div>
                 <div className="detail-fields" style={{ padding: "12px 14px" }}>
                   <DetailField label="Service vendor" value={`${vendor.name} · ${vendor.phone}`} />
@@ -3819,19 +3869,11 @@ function VendorServiceDetailModal({
                   placeholder="Street, area, city"
                 />
               </FormField>
-              <FormField label="Brand">
+              <FormField label="Product">
                 <input
                   className="input"
-                  value={values.brand}
-                  onChange={(event) => update("brand", event.target.value)}
-                  required
-                />
-              </FormField>
-              <FormField label="Model">
-                <input
-                  className="input"
-                  value={values.mobileModel}
-                  onChange={(event) => update("mobileModel", event.target.value)}
+                  value={values.product}
+                  onChange={(event) => update("product", event.target.value)}
                   required
                 />
               </FormField>
@@ -4125,7 +4167,7 @@ function EditSaleModal({
 
           <div style={{ padding: "16px 20px", display: "grid", gap: 16 }}>
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
               <div className="form-grid two-col">
                 <FormField label="Customer name">
                   <input className="input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} required />
@@ -4144,7 +4186,7 @@ function EditSaleModal({
 
             <div className="panel detail-panel" style={{ padding: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Products</h3>
+                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Products</h3>
                 <Button variant="secondary" type="button" onClick={addProduct}><Plus size={14} /> Add product</Button>
               </div>
               <div className="product-list">
@@ -4210,7 +4252,7 @@ function EditSaleModal({
             </div>
 
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Tax & discount</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Tax & discount</h3>
               <div className="form-grid two-col">
                 <FormField label="Invoice discount (₹)">
                   <input className="input" type="number" min="0" value={discount || ""} placeholder="0" onChange={(e) => setDiscount(Math.max(0, Number(e.target.value)))} />
@@ -4221,11 +4263,11 @@ function EditSaleModal({
               </div>
             </div>
 
-            <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, display: "grid", gap: 6, fontSize: 14 }}>
+            <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, display: "grid", gap: 6, fontSize: 15 }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}><span>Subtotal</span><strong>{money(subtotal)}</strong></div>
               <div style={{ display: "flex", justifyContent: "space-between" }}><span>Discount</span><strong>− {money(discount)}</strong></div>
               <div style={{ display: "flex", justifyContent: "space-between" }}><span>Tax</span><strong>{money(tax)}</strong></div>
-              <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px dashed #cbd5e1", paddingTop: 6, fontWeight: 700, fontSize: 15 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px dashed #cbd5e1", paddingTop: 6, fontWeight: 700, fontSize: 17 }}>
                 <span>Total amount</span><strong>{money(finalAmount)}</strong>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", color: "#64748b" }}><span>Already paid</span><span>{money(paid)}</span></div>
@@ -4387,7 +4429,7 @@ function EditServiceModal({
 
           <div style={{ padding: "16px 20px", display: "grid", gap: 14 }}>
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
               <div className="form-grid two-col">
                 <FormField label="Customer name">
                   <input className="input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} required />
@@ -4413,7 +4455,7 @@ function EditServiceModal({
             </div>
 
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Device & issue</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Device & issue</h3>
               <div className="form-grid two-col">
                 <FormField label="Category">
                   <select className="input" value={category} onChange={(e) => setCategory(e.target.value as ProductCategory)}>
@@ -4492,7 +4534,7 @@ function EditServiceModal({
             </div>
 
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#2d3748" }}>Service charges</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Service charges</h3>
               <div className="form-grid two-col">
                 <FormField label="Service amount (₹)">
                   <input className="input" type="number" min="0" value={serviceAmount || ""} placeholder="0" onChange={(e) => setServiceAmount(Math.max(0, Number(e.target.value)))} required />
@@ -4501,7 +4543,7 @@ function EditServiceModal({
                   <input className="input" type="number" min="0" value={discount || ""} placeholder="0" onChange={(e) => setDiscount(Math.max(0, Number(e.target.value)))} />
                 </FormField>
               </div>
-              <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", fontWeight: 600, fontSize: 15 }}>
+              <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", fontWeight: 600, fontSize: 17 }}>
                 <span>Final amount:</span>
                 <strong>{money(finalAmount)}</strong>
               </div>
@@ -4547,6 +4589,11 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
     const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); link.download = `AH Mobiles-report-${dateInputValue()}.csv`; link.click(); URL.revokeObjectURL(link.href);
   };
   const exportServicesPdf = () => {
+    const rupeeSymbol = createRupeeSymbolImage();
+    if (!rupeeSymbol) {
+      window.alert("Could not prepare the rupee symbol for the PDF.");
+      return;
+    }
     const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
     const pageWidth = pdf.internal.pageSize.getWidth();
     const pageHeight = pdf.internal.pageSize.getHeight();
@@ -4563,6 +4610,7 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
       { title: "PAID", width: 22 },
       { title: "BALANCE", width: 22 },
     ];
+    const tableWidth = columns.reduce((sum, column) => sum + column.width, 0);
     const orderedServices = filteredServices.slice()
       .sort((a, b) => (b.createdAt || b.inDate).localeCompare(a.createdAt || a.inDate));
     const serviceTotal = orderedServices.reduce((sum, service) => sum + service.serviceAmount - service.discount, 0);
@@ -4571,28 +4619,14 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
       (sum, service) => sum + serviceDue(service),
       0
     );
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(16);
-    pdf.text("Service Data Report", margin, 13);
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(9);
-    pdf.text(`Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`, margin, 20);
-    pdf.text(`Jobs: ${orderedServices.length}  |  Total: ${pdfMoney(serviceTotal)}  |  Paid: ${pdfMoney(serviceCollected)}  |  Balance: ${pdfMoney(serviceDueTotal)}`, margin, 26);
+    drawPdfReportTitle(pdf, "Service Data Report", margin, 7, tableWidth);
+    const summaryBottom = drawPdfReportSummary(pdf, [
+      `Period: ${from || "All"} to ${to || "All"}  |  Generated: ${dateLabel(new Date().toISOString())}`,
+      `Jobs: ${orderedServices.length}  |  Total: ${pdfMoney(serviceTotal)}  |  Paid: ${pdfMoney(serviceCollected)}  |  Balance: ${pdfMoney(serviceDueTotal)}`,
+    ], margin, 20, tableWidth, rupeeSymbol);
 
-    const drawTableHeader = (y: number) => {
-      pdf.setFillColor(238, 242, 248);
-      pdf.rect(margin, y - 4, pageWidth - margin * 2, 7, "F");
-      pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(7);
-      let x = margin;
-      columns.forEach((column) => {
-        pdf.text(column.title, x + 1, y);
-        x += column.width;
-      });
-      pdf.setFont("helvetica", "normal");
-      return y + 6;
-    };
-    let y = drawTableHeader(34);
+    const drawTableHeader = (y: number) => drawPdfTableHeader(pdf, columns, margin, y);
+    let y = drawTableHeader(summaryBottom + 8);
     orderedServices.forEach((service) => {
       const paid = servicePaid(service);
       const balance = Math.max(0, service.serviceAmount - service.discount - paid);
@@ -4608,25 +4642,18 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
         pdfMoney(paid),
         pdfMoney(balance),
       ];
-      const lines = values.map((value, index) => pdf.splitTextToSize(value || "—", columns[index].width - 2) as string[]);
-      const rowHeight = Math.max(6, ...lines.map((cellLines) => cellLines.length * 3.2 + 2));
+      const lines = wrapPdfTableRow(pdf, columns, values);
+      const rowHeight = pdfTableRowHeight(lines);
       if (y + rowHeight > pageHeight - 12) {
         pdf.addPage();
         y = drawTableHeader(14);
       }
-      let x = margin;
-      lines.forEach((cellLines, index) => {
-        pdf.text(cellLines, x + 1, y, { maxWidth: columns[index].width - 2 });
-        x += columns[index].width;
-      });
-      y += rowHeight;
-      pdf.setDrawColor(225, 230, 238);
-      pdf.line(margin, y - 2, pageWidth - margin, y - 2);
+      y += drawPdfTableRow(pdf, columns, lines, margin, y, rupeeSymbol);
     });
     const pageCount = pdf.getNumberOfPages();
     for (let page = 1; page <= pageCount; page += 1) {
       pdf.setPage(page);
-      pdf.setFontSize(8);
+      pdf.setFontSize(9);
       pdf.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 5, { align: "right" });
     }
     pdf.save(`AH Mobiles-service-report-${dateInputValue()}.pdf`);
@@ -4636,7 +4663,7 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
     <RevenueAnalytics data={data} period={revenuePeriod} onPeriodChange={setRevenuePeriod} canViewSales={canViewSales} canViewServices={canViewServices} />
     <section className="panel report-filter"><div><strong>Report period</strong><span>Choose a date range for your records.</span></div><div className="date-range"><label>From<input className="input" type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><ArrowRight size={15} /><label>To<input className="input" type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label><button className="text-link" onClick={() => { setFrom(""); setTo(""); }}>Clear</button></div></section>
     <div className="report-metrics">{[{ label: "Sales billed", value: money(salesTotal), note: `${filteredSales.length} invoices`, icon: CreditCard }, { label: "Service revenue", value: money(filteredServices.reduce((sum, item) => sum + item.serviceAmount - item.discount, 0)), note: `${filteredServices.length} jobs`, icon: Wrench }, { label: "Collected", value: money(collected), note: "Sales & service payments", icon: CheckCircle2 }, { label: "Outstanding", value: money(due), note: "Remaining balances", icon: Clock3 }].map(({ label, value, note, icon: Icon }) => <div className="panel report-metric" key={label}><span className="metric-icon blue"><Icon size={17} /></span><span>{label}<strong>{value}</strong><small>{note}</small></span></div>)}</div>
-    <div className="reports-grid"><section className="panel report-chart-panel"><div className="panel-heading"><div><h2>Revenue over time</h2><p>Filtered sales, service, and vendor service totals</p></div></div>{filteredSales.length + filteredServices.length + filteredVendorServices.length ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartForPeriod({ ...EMPTY_DATA, sales: filteredSales, services: filteredServices, vendorServices: filteredVendorServices }, "Month")}><CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 14, fill: "#98a1b3" }} /><Tooltip formatter={(value) => money(Number(value))} /><Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" fill="#4777f5" fillOpacity={0.12} /><Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" fill="#22ad94" fillOpacity={0.12} /><Area type="monotone" dataKey="vendorServices" name="Vendor services" stroke="#8c71e8" fill="#8c71e8" fillOpacity={0.12} /></AreaChart></ResponsiveContainer></div> : <EmptyState icon={BarChart3} title="Your reports will grow with you" detail="Add sales and service jobs to see your revenue trends." />}</section><section className="panel report-status-panel"><div className="panel-heading"><div><h2>Service status</h2><p>Jobs by current stage</p></div></div>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => { const count = filteredServices.filter((service) => service.status === status).length; const ratio = filteredServices.length ? count / filteredServices.length * 100 : 0; return <div className="report-status" key={status}><div><span>{status}</span><strong>{count}</strong></div><div className="progress-track"><i className={`progress-${statusClass(status)}`} style={{ width: `${ratio}%` }} /></div></div>; })}</section></div>
+    <div className="reports-grid"><section className="panel report-chart-panel"><div className="panel-heading"><div><h2>Revenue over time</h2><p>Filtered sales, service, and vendor service totals</p></div></div>{filteredSales.length + filteredServices.length + filteredVendorServices.length ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartForPeriod({ ...EMPTY_DATA, sales: filteredSales, services: filteredServices, vendorServices: filteredVendorServices }, "Month")}><CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 15, fill: "#98a1b3" }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 15, fill: "#98a1b3" }} /><Tooltip formatter={(value) => money(Number(value))} /><Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" fill="#4777f5" fillOpacity={0.12} /><Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" fill="#22ad94" fillOpacity={0.12} /><Area type="monotone" dataKey="vendorServices" name="Vendor services" stroke="#8c71e8" fill="#8c71e8" fillOpacity={0.12} /></AreaChart></ResponsiveContainer></div> : <EmptyState icon={BarChart3} title="Your reports will grow with you" detail="Add sales and service jobs to see your revenue trends." />}</section><section className="panel report-status-panel"><div className="panel-heading"><div><h2>Service status</h2><p>Jobs by current stage</p></div></div>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => { const count = filteredServices.filter((service) => service.status === status).length; const ratio = filteredServices.length ? count / filteredServices.length * 100 : 0; return <div className="report-status" key={status}><div><span>{status}</span><strong>{count}</strong></div><div className="progress-track"><i className={`progress-${statusClass(status)}`} style={{ width: `${ratio}%` }} /></div></div>; })}</section></div>
     {canViewServices && <VendorAnalytics data={data} period={revenuePeriod} />}
   </>;
 }

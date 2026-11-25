@@ -8,8 +8,9 @@ const vendorServiceSchema = z.object({
   inDate: z.string().datetime(),
   customerName: z.string().trim().min(2).max(120),
   customerAddress: z.string().trim().max(500).optional().default(""),
-  brand: z.string().trim().min(1).max(80),
-  mobileModel: z.string().trim().min(1).max(120),
+  product: z.string().trim().min(1).max(200).optional(),
+  brand: z.string().trim().min(1).max(80).optional(),
+  mobileModel: z.string().trim().min(1).max(120).optional(),
   customerNumber: z.string().trim().min(7).max(20),
   status: z.enum(["Received", "In progress", "Ready", "Returned"]),
   returnOutcome: z.enum(["Not repaired"]).optional(),
@@ -19,7 +20,10 @@ const vendorServiceSchema = z.object({
   deliveryCustomer: z.string().trim().max(120).optional(),
   serviceCharge: z.number().finite().min(0),
   tax: z.number().finite().min(0).optional(),
-}).strict().transform((value) => value.returnOutcome === "Not repaired"
+}).strict().refine(
+  (value) => !!value.product?.trim() || (!!value.brand?.trim() && !!value.mobileModel?.trim()),
+  { message: "Enter the product, or provide both a brand and model.", path: ["product"] },
+).transform((value) => value.returnOutcome === "Not repaired"
   ? { ...value, status: "Returned" as const, serviceCharge: 0, tax: 0 }
   : value);
 
@@ -28,6 +32,7 @@ const vendorServiceUpdateSchema = z.object({
   customerName: z.string().trim().min(2).max(120).optional(),
   customerAddress: z.string().trim().max(500).optional(),
   customerNumber: z.string().trim().min(7).max(20).optional(),
+  product: z.string().trim().min(1).max(200).optional(),
   brand: z.string().trim().min(1).max(80).optional(),
   mobileModel: z.string().trim().min(1).max(120).optional(),
   receivedCondition: z.string().trim().min(1).max(200).optional(),

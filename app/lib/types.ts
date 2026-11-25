@@ -21,7 +21,7 @@ export type Customer = { id: string; name: string; phone: string; email?: string
 export type ServiceVendor = { id: string; name: string; phone: string; createdAt: string };
 export type VendorService = {
   id: string; vendorId: string; serviceNumber: string; inDate: string; customerName: string;
-  brand: string; mobileModel: string; customerNumber: string; customerAddress?: string; status: ServiceStatus;
+  product?: string; brand?: string; mobileModel?: string; customerNumber: string; customerAddress?: string; status: ServiceStatus;
   returnOutcome?: "Not repaired";
   receivedCondition: string; fault?: string; deliveryDate?: string; deliveryCustomer?: string;
   serviceCharge: number; tax?: number; createdAt: string;

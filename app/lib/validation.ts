@@ -6,8 +6,8 @@ export const customerSchema = z.object({ name: z.string().trim().min(2, "Enter t
 export const serviceVendorSchema = z.object({ name: z.string().trim().min(2, "Enter the vendor name.").max(120), phone });
 export const vendorServiceFormSchema = z.object({
   serviceNumber: z.string().trim().min(1, "Enter the service bill number.").max(120), inDate: z.string().min(1, "Choose an intake date."),
-  customerName: z.string().trim().min(2, "Enter the customer's name."), customerAddress: z.string().trim().max(500), brand: z.string().trim().min(1, "Enter the device brand."),
-  mobileModel: z.string().trim().min(1, "Enter the device model."), customerNumber: phone,
+  customerName: z.string().trim().min(2, "Enter the customer's name."), customerAddress: z.string().trim().max(500),
+  product: z.string().trim().min(1, "Enter the product.").max(200), customerNumber: phone,
   status: z.enum(["Received", "In progress", "Ready", "Returned"]),
   receivedCondition: z.string().trim().min(1, "Enter received condition.").max(200),
   fault: z.string().trim(), deliveryDate: z.string(), deliveryCustomer: z.string().trim().max(120), serviceCharge: money, tax: money.optional(),
