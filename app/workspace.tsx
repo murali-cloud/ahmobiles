@@ -1486,7 +1486,7 @@ export default function Workspace() {
         canEdit={canEditModule("vendors")}
       />
     : route === "customers"
-    ? <CustomersPage customers={data.customers} sales={data.sales} services={data.services} vendors={data.vendors}
+    ? <CustomersPage customers={data.customers} sales={data.sales} services={data.services} vendors={data.vendors} vendorServices={data.vendorServices}
         search={globalSearch} onSearch={setGlobalSearch} onAdd={addCustomerDialog}
         selectedId={routeId} onView={(id) => navigate(id ? `/customers/${id}` : "/customers")}
         onEdit={editCustomerDialog} />
@@ -1787,7 +1787,7 @@ function Dashboard({ data, period, setPeriod, revenuePeriod, setRevenuePeriod, c
               ? <div className="chart-empty"><strong>Choose a valid date range</strong><span>Select both dates to see revenue for that period.</span></div>
               : <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData} margin={{ top: 12, right: 9, left: -18, bottom: 0 }}>
                 <defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#4677f5" stopOpacity={0.17} /><stop offset="100%" stopColor="#4677f5" stopOpacity={0} /></linearGradient><linearGradient id="servicesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#27b69d" stopOpacity={0.16} /><stop offset="100%" stopColor="#27b69d" stopOpacity={0} /></linearGradient><linearGradient id="vendorServicesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8c71e8" stopOpacity={0.16} /><stop offset="100%" stopColor="#8c71e8" stopOpacity={0} /></linearGradient></defs>
-                <CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 15, fill: "#98a1b3" }} dy={8} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 15, fill: "#98a1b3" }} tickFormatter={(value: number) => value === 0 ? "₹0" : `₹${value / 1000}k`} /><Tooltip formatter={(value) => money(Number(value))} contentStyle={{ border: "1px solid #e8ebf1", borderRadius: 10, fontSize: 15 }} />
+                <CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 16, fill: "#98a1b3" }} dy={8} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 16, fill: "#98a1b3" }} tickFormatter={(value: number) => value === 0 ? "₹0" : `₹${value / 1000}k`} /><Tooltip formatter={(value) => money(Number(value))} contentStyle={{ border: "1px solid #e8ebf1", borderRadius: 10, fontSize: 16 }} />
                 {canViewSales && <Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" strokeWidth={2.3} fill="url(#salesFill)" activeDot={{ r: 4 }} />}{canViewServices && <Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" strokeWidth={2.3} fill="url(#servicesFill)" activeDot={{ r: 4 }} />}{canViewServices && <Area type="monotone" dataKey="vendorServices" name="Vendor services" stroke="#8c71e8" strokeWidth={2.3} fill="url(#vendorServicesFill)" activeDot={{ r: 4 }} />}
               </AreaChart></ResponsiveContainer></div>}
           <div className="chart-legend">{canViewSales && <span><i className="legend-dot blue-dot" />Sales</span>}{canViewServices && <span><i className="legend-dot green-dot" />Services</span>}{canViewServices && <span><i className="legend-dot violet-dot" />Vendor services</span>}</div>
@@ -2138,7 +2138,7 @@ function SaleForm({ data, busy, onSubmit, onCancel }: {
             <span className="step-number">03</span>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
               <div><h2>Payment details</h2><p>Record the amount received today.</p></div>
-              <label className="checkbox-wrap" style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontWeight: 500, fontSize: 14 }}>
+              <label className="checkbox-wrap" style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontWeight: 500, fontSize: 15 }}>
                 <input type="checkbox" checked={enableTax} onChange={(event) => {
                   setEnableTax(event.target.checked);
                 }} />
@@ -2605,7 +2605,7 @@ function ReadyPage({ services, vendorServices, vendors, onView, onPayment, onRet
             <span>Received <strong>{dateLabel(service.inDate)}</strong></span>
             <span>Charge <strong>{money(service.serviceCharge)}</strong></span>
           </div>
-          <div className="ready-card-meta"><span>Out person <strong>{service.deliveryCustomer || "—"}</strong></span><span>Delivery <strong>{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</strong></span></div>
+          <div className="ready-card-meta"><span>Out customer <strong>{service.deliveryCustomer || "—"}</strong></span><span>Delivery <strong>{service.deliveryDate ? dateLabel(service.deliveryDate) : "—"}</strong></span></div>
           {canReturn && <div className="ready-card-actions">
             <Button onClick={() => onVendorStatusChange(service, "Returned")}><Check size={15} /> Mark returned</Button>
           </div>}
@@ -2782,7 +2782,7 @@ function printInvoice(sale: Sale, settings: ShopSettings) {
   const logoBackground = settings.logoDataUrl ? "#fff" : "#000";
   const logo = `<img class="shop-logo" style="background:${logoBackground}" src="${escapeHtml(settings.logoDataUrl || BRAND_LOGO_PATH)}" alt="AH Mobiles">`;
   const gstin = settings.gstin ? `<div class="muted">GSTIN: ${escapeHtml(settings.gstin)}</div>` : "";
-  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:13px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #000}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:120px;height:80px;object-fit:contain;background:#000;border-radius:4px}.muted{color:#666;font-size:12px}table{width:100%;border:1px solid #000;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #000;padding:7px 5px}th:not(:last-child),td:not(:last-child){border-right:1px solid #000}th{font-size:10px;color:#111}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #000;padding-top:10px}.footer-note{text-align:center;margin:14px 0}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}${sale.customerAddress ? `<br>${escapeHtml(sale.customerAddress)}` : ""}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p class="footer-note">${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
+  popup.document.write(`<html><head><title>${escapeHtml(sale.invoiceNumber)}</title><style>body{font:14px Arial;color:#111}.head{display:flex;justify-content:space-between;border-bottom:1px solid #000}.shop{display:flex;align-items:flex-start;gap:8px}.shop-logo{width:120px;height:80px;object-fit:contain;background:#000;border-radius:4px}.muted{color:#666;font-size:12px}table{width:100%;border:1px solid #000;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #000;padding:7px 5px}th:not(:last-child),td:not(:last-child){border-right:1px solid #000}th{font-size:10px;color:#111}aside p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #000;padding-top:10px}.footer-note{text-align:center;margin:14px 0}.sign{display:flex;justify-content:space-between}small{display:block;color:#777;margin-top:7px}@media print{@page{size:${pageSize}}${bodyLayout}}</style></head><body><div class="head"><div class="shop">${logo}<div><div class="muted">${escapeHtml(settings.address)}</div><div class="muted">${escapeHtml(settings.phone)}</div>${gstin}</div></div><div><h2>INVOICE</h2><strong>${escapeHtml(sale.invoiceNumber)}</strong><small>${dateLabel(sale.invoiceDate)}</small></div></div><p><strong>${escapeHtml(sale.customerName)}</strong><br>${escapeHtml(sale.contactNumber)}${sale.customerAddress ? `<br>${escapeHtml(sale.customerAddress)}` : ""}</p><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table><aside><p>Subtotal <strong>${money(sale.subtotal)}</strong></p><p>Discount <strong>− ${money(sale.discount)}</strong></p><p>Tax <strong>${money(sale.tax)}</strong></p><p class="total">Total <strong>${money(sale.finalAmount)}</strong></p><p>Paid <strong>${money(paymentTotal(sale.payments))}</strong></p><p>Balance <strong>${money(Math.max(0, sale.finalAmount - paymentTotal(sale.payments)))}</strong></p></aside><p class="footer-note">${escapeHtml(settings.invoiceFooter)}</p><div class="sign"><span>Customer signature</span><span>Authorized signature</span></div><script>window.onload=()=>window.print()</script></body></html>`);
   popup.document.close();
 }
 
@@ -3059,8 +3059,8 @@ async function downloadServiceReceipt(service: ServiceJob, settings: ShopSetting
   pdf.save(`${service.serviceNumber}.pdf`);
 }
 
-function CustomersPage({ customers, sales, services, vendors, search, onSearch, onAdd, selectedId, onView, onEdit }: {
-  customers: Customer[]; sales: Sale[]; services: ServiceJob[]; vendors: ServiceVendor[]; search: string; onSearch: (value: string) => void;
+function CustomersPage({ customers, sales, services, vendors, vendorServices, search, onSearch, onAdd, selectedId, onView, onEdit }: {
+  customers: Customer[]; sales: Sale[]; services: ServiceJob[]; vendors: ServiceVendor[]; vendorServices: VendorService[]; search: string; onSearch: (value: string) => void;
   onAdd: () => void; selectedId: string; onView: (id: string) => void; onEdit: (customer: Customer) => void;
 }) {
   if (selectedId) {
@@ -3132,23 +3132,83 @@ function CustomersPage({ customers, sales, services, vendors, search, onSearch, 
   "sales" | "service" | "vendor"
 >("sales");
 
+  type VendorCustomerRow = {
+    key: string;
+    customer?: Customer;
+    name: string;
+    phone: string;
+    jobCount: number;
+    vendors: Set<string>;
+    statuses: Set<ServiceStatus | "Refund">;
+  };
+  const vendorCustomersByPhone = new Map<string, VendorCustomerRow>();
+  const addVendorCustomer = (record: {
+    id: string;
+    customerId?: string;
+    name: string;
+    phone: string;
+    vendorId?: string;
+    status: ServiceStatus | "Refund";
+  }) => {
+    const normalizedPhone = record.phone.replace(/\D/g, "");
+    const customer = customers.find((item) => item.id === record.customerId)
+      ?? (normalizedPhone
+        ? customers.find((item) => item.phone.replace(/\D/g, "") === normalizedPhone)
+        : undefined);
+    const key = normalizedPhone || customer?.id || record.id;
+    const row = vendorCustomersByPhone.get(key) ?? {
+      key,
+      customer,
+      name: customer?.name ?? record.name,
+      phone: customer?.phone ?? record.phone,
+      jobCount: 0,
+      vendors: new Set<string>(),
+      statuses: new Set<ServiceStatus | "Refund">(),
+    };
+    if (!row.customer && customer) {
+      row.customer = customer;
+      row.name = customer.name;
+      row.phone = customer.phone;
+    }
+    row.jobCount += 1;
+    row.vendors.add(vendors.find((vendor) => vendor.id === record.vendorId)?.name ?? "Vendor not found");
+    row.statuses.add(record.status);
+    vendorCustomersByPhone.set(key, row);
+  };
+  services.filter((service) => service.vendorId).forEach((service) => {
+    addVendorCustomer({
+      id: service.id,
+      customerId: service.customerId,
+      name: service.customerName,
+      phone: service.contactNumber,
+      vendorId: service.vendorId,
+      status: service.returnOutcome === "Not repaired" ? "Refund" : service.status,
+    });
+  });
+  vendorServices.forEach((service) => {
+    addVendorCustomer({
+      id: service.id,
+      name: service.customerName,
+      phone: service.customerNumber,
+      vendorId: service.vendorId,
+      status: service.returnOutcome === "Not repaired" ? "Refund" : service.status,
+    });
+  });
+  const filteredVendorCustomers = Array.from(vendorCustomersByPhone.values())
+    .filter((row) => !search || `${row.name} ${row.phone} ${row.customer?.email ?? ""} ${Array.from(row.vendors).join(" ")}`.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
   const salesCustomerIds = new Set(sales.map((sale) => sale.customerId));
 
 const serviceCustomerIds = new Set(services.map((service) => service.customerId));
 
-const vendorCustomerIds = new Set(
-  services.filter((service) => service.vendorId).map((service) => service.customerId)
-);
-
 const customerTypeIds =
   customerType === "sales"
     ? salesCustomerIds
-    : customerType === "service"
-    ? serviceCustomerIds
-    : vendorCustomerIds;
+    : serviceCustomerIds;
 
 const filtered = customers.filter((customer) => {
-  const matchesType = customerTypeIds.has(customer.id);
+  const matchesType = customerType !== "vendor" && customerTypeIds.has(customer.id);
   const matchesSearch =
     !search ||
     `${customer.name} ${customer.phone} ${customer.email}`
@@ -3157,6 +3217,7 @@ const filtered = customers.filter((customer) => {
 
   return matchesType && matchesSearch;
 });
+  const visibleCustomerCount = customerType === "vendor" ? filteredVendorCustomers.length : filtered.length;
   
   return <>
     <PageHeader eyebrow="PEOPLE & RELATIONSHIPS" title="Customers" description="A single place for the people behind every sale and service."><Button onClick={onAdd}><Plus size={16} /> Add customer</Button>
@@ -3185,12 +3246,12 @@ const filtered = customers.filter((customer) => {
 </div>
     <div className="customer-metrics"><div className="panel mini-metric"><span className="metric-icon blue"><Users size={17} /></span><span>Total customers<strong>{customers.length}</strong></span></div><div className="panel mini-metric"><span className="metric-icon green"><CreditCard size={17} /></span><span>Sales recorded<strong>{sales.length}</strong></span></div><div className="panel mini-metric"><span className="metric-icon amber"><Wrench size={17} /></span><span>Service jobs<strong>{services.length}</strong></span></div></div>
     <div className="panel table-panel"><div className="table-toolbar"><label className="table-search"><Search size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Search name, phone or email…" /></label><span className="table-results">
-  {filtered.length} {customerType === "sales"
+  {visibleCustomerCount} {customerType === "sales"
     ? "sales customers"
     : customerType === "service"
     ? "service customers"
     : "vendor customers"}
-</span></div>{filtered.length ? <div className="table-scroll"><table className="data-table"><thead>
+</span></div>{visibleCustomerCount ? <div className="table-scroll"><table className="data-table"><thead>
   <tr>
     <th>CUSTOMER</th>
     <th>CONTACT</th>
@@ -3221,7 +3282,41 @@ const filtered = customers.filter((customer) => {
 
     <th />
   </tr>
-</thead><tbody>{filtered.map((customer) => {
+</thead><tbody>{customerType === "vendor" ? filteredVendorCustomers.map((row) => {
+  const actualCustomer = row.customer;
+  return (
+    <tr key={row.key}>
+      <td>
+        <span className="customer-cell">
+          <span className="mini-avatar">{row.name[0]?.toUpperCase()}</span>
+          <span>
+            <strong>{row.name}</strong>
+            <small>{actualCustomer ? `Since ${dateLabel(actualCustomer.createdAt)}` : "Vendor customer"}</small>
+          </span>
+        </span>
+      </td>
+      <td>
+        {row.phone}
+        <small className="table-subtext">{actualCustomer?.email || ""}</small>
+      </td>
+      <td>{row.jobCount}</td>
+      <td>{Array.from(row.vendors).sort().map((vendorName) => <div key={vendorName}>{vendorName}</div>)}</td>
+      <td>{Array.from(row.statuses).map((status) => <div key={status}><StatusBadge status={status} /></div>)}</td>
+      <td>
+        {actualCustomer && (
+          <>
+            <button className="row-action" aria-label={`Open ${row.name}`} onClick={() => onView(actualCustomer.id)}>
+              <ArrowRight size={15} />
+            </button>
+            <button className="row-action" aria-label={`Edit ${row.name}`} onClick={() => onEdit(actualCustomer)}>
+              <Settings size={14} />
+            </button>
+          </>
+        )}
+      </td>
+    </tr>
+  );
+}) : filtered.map((customer) => {
   const ownSales = sales.filter(
     (sale) => sale.customerId === customer.id
   );
@@ -3229,8 +3324,6 @@ const filtered = customers.filter((customer) => {
   const ownServices = services.filter(
     (service) => service.customerId === customer.id
   );
-
-  const ownVendorServices = ownServices.filter((service) => service.vendorId);
 
   const spend =
     ownSales.reduce((sum, sale) => sum + sale.finalAmount, 0) +
@@ -3298,25 +3391,6 @@ const filtered = customers.filter((customer) => {
         </>
       )}
 
-      {customerType === "vendor" && (
-        <>
-          <td>{ownVendorServices.length}</td>
-          <td>
-            {ownVendorServices.map((service) => {
-              const vendor = vendors.find((item) => item.id === service.vendorId);
-              return <div key={service.id}>{vendor?.name || "Vendor not found"}</div>;
-            })}
-          </td>
-          <td>
-            {ownVendorServices.map((service) => (
-              <div key={service.id}>
-                <StatusBadge status={service.status} />
-              </div>
-            ))}
-          </td>
-        </>
-      )}
-
       <td>
         <button
           className="row-action"
@@ -3336,7 +3410,7 @@ const filtered = customers.filter((customer) => {
       </td>
     </tr>
   );
-})}</tbody></table></div> : <EmptyState icon={Users} title={search ? "No customers found" : "Meet your first customer"} detail={search ? "Try a different search." : "Customers added during sales or service intake appear here too."} action={!search ? <Button onClick={onAdd}><Plus size={15} /> Add customer</Button> : undefined} />}</div>
+})}</tbody></table></div> : <EmptyState icon={Users} title={search ? "No customers found" : customerType === "vendor" ? "No vendor customers yet" : "Meet your first customer"} detail={search ? "Try a different search." : customerType === "vendor" ? "Customers from vendor service records will appear here." : "Customers added during sales or service intake appear here too."} action={!search && customerType !== "vendor" ? <Button onClick={onAdd}><Plus size={15} /> Add customer</Button> : undefined} />}</div>
   </>;
 }
 
@@ -3452,7 +3526,7 @@ function ServiceVendorsPage({ vendors, vendorServices, search, onSearch, selecte
           </div>
         </div>
         {filteredVendorServices.length
-          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>PRODUCT</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>DELIVERY CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}>
+          ? <div className="table-scroll"><table className="data-table"><thead><tr><th>SERVICE BILL NO.</th><th>IN DATE</th><th>IN CUSTOMER NAME</th><th>PRODUCT</th><th>CUSTOMER NUMBER</th><th>STATUS</th><th>DELIVERY DATE</th><th>OUT CUSTOMER</th><th>SERVICE CHARGE</th><th /></tr></thead><tbody>{filteredVendorServices.map((service) => <tr key={service.id}>
             <td><button className="table-primary-link" onClick={() => onEditService(service)} title="View customer & product details">{service.serviceNumber}</button></td>
             <td><span className="muted-cell">{dateLabel(service.inDate)}</span></td>
             <td>{service.customerName}</td>
@@ -3650,7 +3724,7 @@ function VendorServiceModal({ vendor, initialServiceNumber, onClose, onSave }: {
     </FormField>
     <FormField label="Service charge (₹)"><input className="input" type="number" min="0" value={values.serviceCharge} onChange={(event) => update("serviceCharge", event.target.value)} /></FormField>
     <FormField label="Delivery date (optional)"><input className="input" type="date" value={values.deliveryDate} onChange={(event) => update("deliveryDate", event.target.value)} /></FormField>
-    <FormField label="Out person"><input className="input" value={values.deliveryCustomer} onChange={(event) => update("deliveryCustomer", event.target.value)} /></FormField>
+    <FormField label="Out customer"><input className="input" value={values.deliveryCustomer} onChange={(event) => update("deliveryCustomer", event.target.value)} /></FormField>
     {error && <span className="field-error">{error}</span>}
   </div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Plus size={15} /> Save service</>}</Button></div></form></div>;
 }
@@ -3780,10 +3854,10 @@ function VendorServiceDetailModal({
             <div style={{ padding: "16px 20px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 14, color: "#718096" }}>Status:</span>
+                  <span style={{ fontSize: 15, color: "#718096" }}>Status:</span>
                   <StatusBadge status={service.returnOutcome === "Not repaired" ? "Refund" : service.status} />
                 </div>
-                <div style={{ fontSize: 14, color: "#718096" }}>
+                <div style={{ fontSize: 15, color: "#718096" }}>
                   In date: <strong>{dateLabel(service.inDate)}</strong>
                 </div>
               </div>
@@ -3791,13 +3865,13 @@ function VendorServiceDetailModal({
               {/* Customer Details */}
               <div className="panel detail-panel" style={{ marginBottom: 14 }}>
                 <div className="panel-heading" style={{ padding: "10px 14px", borderBottom: "1px solid #edf0f4" }}>
-                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
+                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
                 </div>
                 <div className="detail-fields" style={{ padding: "12px 14px" }}>
                   <DetailField label="In person / Name" value={service.customerName} />
                   <DetailField label="Customer number" value={service.customerNumber} />
                   <DetailField label="Customer address" value={service.customerAddress || "—"} />
-                  <DetailField label="Out person / Delivered to" value={service.deliveryCustomer || "—"} />
+                  <DetailField label="Out customer" value={service.deliveryCustomer || "—"} />
                   <DetailField label="Delivery date" value={service.deliveryDate ? dateLabel(service.deliveryDate) : "—"} />
                 </div>
               </div>
@@ -3805,7 +3879,7 @@ function VendorServiceDetailModal({
               {/* Product Details */}
               <div className="panel detail-panel" style={{ marginBottom: 14 }}>
                 <div className="panel-heading" style={{ padding: "10px 14px", borderBottom: "1px solid #edf0f4" }}>
-                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Product details</h3>
+                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#2d3748" }}>Product details</h3>
                 </div>
                 <div className="detail-fields" style={{ padding: "12px 14px" }}>
                   <DetailField label="Product" value={vendorServiceProduct(service) || "—"} />
@@ -3817,7 +3891,7 @@ function VendorServiceDetailModal({
               {/* Service & Charge Details */}
               <div className="panel detail-panel">
                 <div className="panel-heading" style={{ padding: "10px 14px", borderBottom: "1px solid #edf0f4" }}>
-                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Service & charges</h3>
+                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#2d3748" }}>Service & charges</h3>
                 </div>
                 <div className="detail-fields" style={{ padding: "12px 14px" }}>
                   <DetailField label="Service vendor" value={`${vendor.name} · ${vendor.phone}`} />
@@ -3931,7 +4005,7 @@ function VendorServiceDetailModal({
                   onChange={(event) => update("deliveryDate", event.target.value)}
                 />
               </FormField>
-              <FormField label="Out person (Delivered to)">
+              <FormField label="Out customer">
                 <input
                   className="input"
                   value={values.deliveryCustomer}
@@ -3984,7 +4058,7 @@ function VendorServiceDeliveryModal({ service, vendor, onClose, onSave }: {
       setSaving(false);
     }
   };
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">{vendor.name.toUpperCase()} · {service.serviceNumber}</span><h2>Delivery details</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><FormField label="Delivery date"><input className="input" type="date" value={deliveryDate} onChange={(event) => setDeliveryDate(event.target.value)} required /><span className="field-hint">Defaults to today.</span></FormField><FormField label="Delivery customer"><input className="input" value={deliveryCustomer} onChange={(event) => setDeliveryCustomer(event.target.value)} placeholder="Name of the person receiving the device" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} /> Save delivery details</>}</Button></div></form></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-box compact-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">{vendor.name.toUpperCase()} · {service.serviceNumber}</span><h2>Delivery details</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="modal-fields"><FormField label="Delivery date"><input className="input" type="date" value={deliveryDate} onChange={(event) => setDeliveryDate(event.target.value)} required /><span className="field-hint">Defaults to today.</span></FormField><FormField label="Out customer"><input className="input" value={deliveryCustomer} onChange={(event) => setDeliveryCustomer(event.target.value)} placeholder="Name of the person receiving the device" /></FormField>{error && <span className="field-error">{error}</span>}</div><div className="modal-footer"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} /> Save delivery details</>}</Button></div></form></div>;
 }
 
 function ConfirmDeleteModal({
@@ -4167,7 +4241,7 @@ function EditSaleModal({
 
           <div style={{ padding: "16px 20px", display: "grid", gap: 16 }}>
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 16, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
               <div className="form-grid two-col">
                 <FormField label="Customer name">
                   <input className="input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} required />
@@ -4186,7 +4260,7 @@ function EditSaleModal({
 
             <div className="panel detail-panel" style={{ padding: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Products</h3>
+                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#2d3748" }}>Products</h3>
                 <Button variant="secondary" type="button" onClick={addProduct}><Plus size={14} /> Add product</Button>
               </div>
               <div className="product-list">
@@ -4252,7 +4326,7 @@ function EditSaleModal({
             </div>
 
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Tax & discount</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 16, fontWeight: 600, color: "#2d3748" }}>Tax & discount</h3>
               <div className="form-grid two-col">
                 <FormField label="Invoice discount (₹)">
                   <input className="input" type="number" min="0" value={discount || ""} placeholder="0" onChange={(e) => setDiscount(Math.max(0, Number(e.target.value)))} />
@@ -4263,11 +4337,11 @@ function EditSaleModal({
               </div>
             </div>
 
-            <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, display: "grid", gap: 6, fontSize: 15 }}>
+            <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, display: "grid", gap: 6, fontSize: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}><span>Subtotal</span><strong>{money(subtotal)}</strong></div>
               <div style={{ display: "flex", justifyContent: "space-between" }}><span>Discount</span><strong>− {money(discount)}</strong></div>
               <div style={{ display: "flex", justifyContent: "space-between" }}><span>Tax</span><strong>{money(tax)}</strong></div>
-              <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px dashed #cbd5e1", paddingTop: 6, fontWeight: 700, fontSize: 17 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px dashed #cbd5e1", paddingTop: 6, fontWeight: 700, fontSize: 18 }}>
                 <span>Total amount</span><strong>{money(finalAmount)}</strong>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", color: "#64748b" }}><span>Already paid</span><span>{money(paid)}</span></div>
@@ -4429,7 +4503,7 @@ function EditServiceModal({
 
           <div style={{ padding: "16px 20px", display: "grid", gap: 14 }}>
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 16, fontWeight: 600, color: "#2d3748" }}>Customer details</h3>
               <div className="form-grid two-col">
                 <FormField label="Customer name">
                   <input className="input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} required />
@@ -4455,7 +4529,7 @@ function EditServiceModal({
             </div>
 
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Device & issue</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 16, fontWeight: 600, color: "#2d3748" }}>Device & issue</h3>
               <div className="form-grid two-col">
                 <FormField label="Category">
                   <select className="input" value={category} onChange={(e) => setCategory(e.target.value as ProductCategory)}>
@@ -4534,7 +4608,7 @@ function EditServiceModal({
             </div>
 
             <div className="panel detail-panel" style={{ padding: 14 }}>
-              <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 600, color: "#2d3748" }}>Service charges</h3>
+              <h3 style={{ margin: "0 0 12px", fontSize: 16, fontWeight: 600, color: "#2d3748" }}>Service charges</h3>
               <div className="form-grid two-col">
                 <FormField label="Service amount (₹)">
                   <input className="input" type="number" min="0" value={serviceAmount || ""} placeholder="0" onChange={(e) => setServiceAmount(Math.max(0, Number(e.target.value)))} required />
@@ -4543,7 +4617,7 @@ function EditServiceModal({
                   <input className="input" type="number" min="0" value={discount || ""} placeholder="0" onChange={(e) => setDiscount(Math.max(0, Number(e.target.value)))} />
                 </FormField>
               </div>
-              <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", fontWeight: 600, fontSize: 17 }}>
+              <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", fontWeight: 600, fontSize: 18 }}>
                 <span>Final amount:</span>
                 <strong>{money(finalAmount)}</strong>
               </div>
@@ -4663,7 +4737,7 @@ function ReportsPage({ data, revenuePeriod, setRevenuePeriod, canViewSales, canV
     <RevenueAnalytics data={data} period={revenuePeriod} onPeriodChange={setRevenuePeriod} canViewSales={canViewSales} canViewServices={canViewServices} />
     <section className="panel report-filter"><div><strong>Report period</strong><span>Choose a date range for your records.</span></div><div className="date-range"><label>From<input className="input" type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><ArrowRight size={15} /><label>To<input className="input" type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label><button className="text-link" onClick={() => { setFrom(""); setTo(""); }}>Clear</button></div></section>
     <div className="report-metrics">{[{ label: "Sales billed", value: money(salesTotal), note: `${filteredSales.length} invoices`, icon: CreditCard }, { label: "Service revenue", value: money(filteredServices.reduce((sum, item) => sum + item.serviceAmount - item.discount, 0)), note: `${filteredServices.length} jobs`, icon: Wrench }, { label: "Collected", value: money(collected), note: "Sales & service payments", icon: CheckCircle2 }, { label: "Outstanding", value: money(due), note: "Remaining balances", icon: Clock3 }].map(({ label, value, note, icon: Icon }) => <div className="panel report-metric" key={label}><span className="metric-icon blue"><Icon size={17} /></span><span>{label}<strong>{value}</strong><small>{note}</small></span></div>)}</div>
-    <div className="reports-grid"><section className="panel report-chart-panel"><div className="panel-heading"><div><h2>Revenue over time</h2><p>Filtered sales, service, and vendor service totals</p></div></div>{filteredSales.length + filteredServices.length + filteredVendorServices.length ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartForPeriod({ ...EMPTY_DATA, sales: filteredSales, services: filteredServices, vendorServices: filteredVendorServices }, "Month")}><CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 15, fill: "#98a1b3" }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 15, fill: "#98a1b3" }} /><Tooltip formatter={(value) => money(Number(value))} /><Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" fill="#4777f5" fillOpacity={0.12} /><Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" fill="#22ad94" fillOpacity={0.12} /><Area type="monotone" dataKey="vendorServices" name="Vendor services" stroke="#8c71e8" fill="#8c71e8" fillOpacity={0.12} /></AreaChart></ResponsiveContainer></div> : <EmptyState icon={BarChart3} title="Your reports will grow with you" detail="Add sales and service jobs to see your revenue trends." />}</section><section className="panel report-status-panel"><div className="panel-heading"><div><h2>Service status</h2><p>Jobs by current stage</p></div></div>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => { const count = filteredServices.filter((service) => service.status === status).length; const ratio = filteredServices.length ? count / filteredServices.length * 100 : 0; return <div className="report-status" key={status}><div><span>{status}</span><strong>{count}</strong></div><div className="progress-track"><i className={`progress-${statusClass(status)}`} style={{ width: `${ratio}%` }} /></div></div>; })}</section></div>
+    <div className="reports-grid"><section className="panel report-chart-panel"><div className="panel-heading"><div><h2>Revenue over time</h2><p>Filtered sales, service, and vendor service totals</p></div></div>{filteredSales.length + filteredServices.length + filteredVendorServices.length ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chartForPeriod({ ...EMPTY_DATA, sales: filteredSales, services: filteredServices, vendorServices: filteredVendorServices }, "Month")}><CartesianGrid stroke="#eef1f6" strokeDasharray="3 5" vertical={false} /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 16, fill: "#98a1b3" }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 16, fill: "#98a1b3" }} /><Tooltip formatter={(value) => money(Number(value))} /><Area type="monotone" dataKey="sales" name="Sales" stroke="#4777f5" fill="#4777f5" fillOpacity={0.12} /><Area type="monotone" dataKey="services" name="Services" stroke="#22ad94" fill="#22ad94" fillOpacity={0.12} /><Area type="monotone" dataKey="vendorServices" name="Vendor services" stroke="#8c71e8" fill="#8c71e8" fillOpacity={0.12} /></AreaChart></ResponsiveContainer></div> : <EmptyState icon={BarChart3} title="Your reports will grow with you" detail="Add sales and service jobs to see your revenue trends." />}</section><section className="panel report-status-panel"><div className="panel-heading"><div><h2>Service status</h2><p>Jobs by current stage</p></div></div>{(["Received", "In progress", "Ready", "Returned"] as ServiceStatus[]).map((status) => { const count = filteredServices.filter((service) => service.status === status).length; const ratio = filteredServices.length ? count / filteredServices.length * 100 : 0; return <div className="report-status" key={status}><div><span>{status}</span><strong>{count}</strong></div><div className="progress-track"><i className={`progress-${statusClass(status)}`} style={{ width: `${ratio}%` }} /></div></div>; })}</section></div>
     {canViewServices && <VendorAnalytics data={data} period={revenuePeriod} />}
   </>;
 }
